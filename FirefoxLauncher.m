@@ -141,45 +141,9 @@
 
 - (void)activateFirefox
 {
-    NSLog(@"Attempting to activate Firefox windows");
-    
-    // Try wmctrl first (if available)
-    NSTask *wmctrlTask = [[NSTask alloc] init];
-    [wmctrlTask setLaunchPath:@"/usr/bin/wmctrl"];
-    [wmctrlTask setArguments:@[@"-a", @"Firefox"]];
-    
-    NS_DURING
-        [wmctrlTask launch];
-        [wmctrlTask waitUntilExit];
-        
-        if ([wmctrlTask terminationStatus] == 0) {
-            NSLog(@"Firefox activated using wmctrl");
-            [wmctrlTask release];
-            return;
-        }
-    NS_HANDLER
-        NSLog(@"wmctrl not available or failed");
-    NS_ENDHANDLER
-    [wmctrlTask release];
-    
-    // Try xdotool as fallback
-    NSTask *xdotoolTask = [[NSTask alloc] init];
-    [xdotoolTask setLaunchPath:@"/usr/bin/xdotool"];
-    [xdotoolTask setArguments:@[@"search", @"--name", @"Firefox", @"windowactivate", @"%1"]];
-    
-    NS_DURING
-        [xdotoolTask launch];
-        [xdotoolTask waitUntilExit];
-        
-        if ([xdotoolTask terminationStatus] == 0) {
-            NSLog(@"Firefox activated using xdotool");
-        } else {
-            NSLog(@"Could not activate Firefox windows - no suitable window manager tools found");
-        }
-    NS_HANDLER
-        NSLog(@"xdotool not available or failed");
-    NS_ENDHANDLER
-    [xdotoolTask release];
+    NSLog(@"Firefox activation requested - window management not implemented");
+    // Window management removed for now since wmctrl/xdotool don't work
+    // The dock icon will still show Firefox is running
 }
 
 - (void)handleFirefoxTermination:(NSNotification *)notification
