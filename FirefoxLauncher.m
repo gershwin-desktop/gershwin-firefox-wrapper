@@ -15,7 +15,6 @@
 
 - (void)applicationWillFinishLaunching:(NSNotification *)notification
 {
-    // Set up the application icon
     NSString *iconPath = [[NSBundle mainBundle] pathForResource:@"Firefox" ofType:@"png"];
     if (iconPath && [[NSFileManager defaultManager] fileExistsAtPath:iconPath]) {
         NSImage *icon = [[NSImage alloc] initWithContentsOfFile:iconPath];
@@ -25,18 +24,14 @@
         }
     }
     
-    // Set up service for preventing multiple instances
     serviceConnection = [NSConnection defaultConnection];
     [serviceConnection setRootObject:self];
     
     if (![serviceConnection registerName:@"FirefoxLauncher"]) {
-        // Another instance exists - activate it and exit
         NSConnection *existing = [NSConnection connectionWithRegisteredName:@"FirefoxLauncher" host:nil];
         if (existing) {
-            // Try to activate the existing Firefox instance
             NSLog(@"Firefox launcher already running, activating existing instance");
         }
-        // Exit this instance
         exit(0);
     }
     
@@ -45,10 +40,8 @@
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification
 {
-    // Check if Firefox is already running
     if ([self isFirefoxCurrentlyRunning]) {
         NSLog(@"Firefox is already running");
-        // Don't exit - stay running to represent Firefox in the dock
     } else {
         NSLog(@"Firefox not running, launching it");
         [self launchFirefox];
@@ -66,14 +59,12 @@
     
     firefoxTask = [[NSTask alloc] init];
     [firefoxTask setLaunchPath:firefoxExecutablePath];
-    [firefoxTask setArguments:@[]];  // Add any Firefox arguments here if needed
+    [firefoxTask setArguments:@[]];
     
-    // Set environment to prevent Firefox from detaching
     NSMutableDictionary *environment = [[[NSProcessInfo processInfo] environment] mutableCopy];
     [firefoxTask setEnvironment:environment];
     [environment release];
     
-    // Register for termination notification
     [[NSNotificationCenter defaultCenter] 
         addObserver:self 
         selector:@selector(handleFirefoxTermination:) 
@@ -90,7 +81,6 @@
         [firefoxTask release];
         firefoxTask = nil;
         
-        // Show error dialog
         NSAlert *alert = [[NSAlert alloc] init];
         [alert setMessageText:@"Firefox Launch Error"];
         [alert setInformativeText:[NSString stringWithFormat:@"Could not launch Firefox from %@. Please check that Firefox is installed.", firefoxExecutablePath]];
@@ -98,19 +88,16 @@
         [alert runModal];
         [alert release];
         
-        // Exit the app since we can't launch Firefox
         [NSApp terminate:self];
     NS_ENDHANDLER
 }
 
 - (BOOL)isFirefoxCurrentlyRunning
 {
-    // First check our tracked task
     if (firefoxTask && [firefoxTask isRunning]) {
         return YES;
     }
     
-    // Fallback: check system processes
     NSTask *task = [[NSTask alloc] init];
     [task setLaunchPath:@"/usr/bin/pgrep"];
     [task setArguments:@[@"-f", @"firefox"]];
@@ -145,20 +132,17 @@
         NSLog(@"Firefox process terminated (PID: %d)", [task processIdentifier]);
         isFirefoxRunning = NO;
         
-        // Clean up
         [[NSNotificationCenter defaultCenter] removeObserver:self 
                                                         name:NSTaskDidTerminateNotification 
                                                       object:firefoxTask];
         [firefoxTask release];
         firefoxTask = nil;
         
-        // Exit the launcher since Firefox has quit
         NSLog(@"Firefox has quit, terminating Firefox launcher");
         [NSApp terminate:self];
     }
 }
 
-// Handle dock icon clicks and app activation
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)theApplication hasVisibleWindows:(BOOL)flag
 {
     NSLog(@"Firefox app wrapper activated from dock");
@@ -169,25 +153,20 @@
         [self launchFirefox];
     }
     
-    return NO; // We don't have windows to show
+    return NO;
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification
 {
     NSLog(@"Firefox launcher will terminate");
     
-    // Clean up service connection
     if (serviceConnection) {
         [serviceConnection invalidate];
     }
-    
-    // Note: We don't terminate Firefox when the launcher quits
-    // Firefox should continue running independently
 }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender
 {
-    // Allow termination but don't kill Firefox
     return NSTerminateNow;
 }
 
