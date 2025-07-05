@@ -47,8 +47,7 @@
 {
     // Check if Firefox is already running
     if ([self isFirefoxCurrentlyRunning]) {
-        NSLog(@"Firefox is already running, activating it");
-        [self activateFirefox];
+        NSLog(@"Firefox is already running");
         // Don't exit - stay running to represent Firefox in the dock
     } else {
         NSLog(@"Firefox not running, launching it");
@@ -60,7 +59,6 @@
 {
     if (isFirefoxRunning && firefoxTask && [firefoxTask isRunning]) {
         NSLog(@"Firefox is already running");
-        [self activateFirefox];
         return;
     }
     
@@ -139,13 +137,6 @@
     return running;
 }
 
-- (void)activateFirefox
-{
-    NSLog(@"Firefox activation requested - window management not implemented");
-    // Window management removed for now since wmctrl/xdotool don't work
-    // The dock icon will still show Firefox is running
-}
-
 - (void)handleFirefoxTermination:(NSNotification *)notification
 {
     NSTask *task = [notification object];
@@ -173,7 +164,7 @@
     NSLog(@"Firefox app wrapper activated from dock");
     
     if ([self isFirefoxCurrentlyRunning]) {
-        [self activateFirefox];
+        NSLog(@"Firefox is already running");
     } else {
         [self launchFirefox];
     }

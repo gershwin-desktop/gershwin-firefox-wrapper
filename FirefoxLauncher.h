@@ -10,7 +10,6 @@
 }
 
 - (void)launchFirefox;
-- (void)activateFirefox;
 - (BOOL)isFirefoxCurrentlyRunning;
 - (void)handleFirefoxTermination:(NSNotification *)notification;
 
