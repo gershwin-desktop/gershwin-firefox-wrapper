@@ -64,9 +64,9 @@
 
 - (void)startPeriodicFirefoxMonitoring
 {
-    NSDebugLog(@"Starting Firefox monitoring (1 second intervals)");
+    NSDebugLog(@"Starting Firefox monitoring (0.5 second intervals)");
     
-    [NSTimer scheduledTimerWithTimeInterval:1.0
+    [NSTimer scheduledTimerWithTimeInterval:0.5
                                      target:self
                                    selector:@selector(periodicFirefoxCheck:)
                                    userInfo:nil
@@ -438,7 +438,7 @@
             NSDebugLog(@"Firefox launched with file, PID: %d", [firefoxTask processIdentifier]);
             
             if (shouldActivate) {
-                [self performSelector:@selector(waitForFirefoxToStart) withObject:nil afterDelay:1.0];
+                [self performSelector:@selector(waitForFirefoxToStart) withObject:nil afterDelay:0.5];
             }
         NS_HANDLER
             NSDebugLog(@"Failed to launch Firefox with file: %@", localException);
@@ -598,14 +598,14 @@
             if (foundFirefoxWindow) {
                 [self activateFirefoxWindows];
             } else {
-                [self performSelector:@selector(waitForFirefoxToStart) withObject:nil afterDelay:1.0];
+                [self performSelector:@selector(waitForFirefoxToStart) withObject:nil afterDelay:0.5];
             }
         } else {
-            [self performSelector:@selector(waitForFirefoxToStart) withObject:nil afterDelay:1.0];
+            [self performSelector:@selector(waitForFirefoxToStart) withObject:nil afterDelay:0.5];
         }
     NS_HANDLER
         NSDebugLog(@"Failed to check for Firefox windows: %@", localException);
-        [self performSelector:@selector(waitForFirefoxToStart) withObject:nil afterDelay:1.0];
+        [self performSelector:@selector(waitForFirefoxToStart) withObject:nil afterDelay:0.5];
     NS_ENDHANDLER
     
     [listTask release];
@@ -661,7 +661,7 @@
                           object:[NSWorkspace sharedWorkspace]
                         userInfo:didLaunchInfo];
         
-        [self performSelector:@selector(waitForFirefoxToStart) withObject:nil afterDelay:1.0];
+        [self performSelector:@selector(waitForFirefoxToStart) withObject:nil afterDelay:0.5];
         
     NS_HANDLER
         NSDebugLog(@"Failed to launch Firefox: %@", localException);
@@ -728,7 +728,7 @@
         
         [self performSelector:@selector(checkForRemainingFirefoxProcesses) 
                    withObject:nil 
-                   afterDelay:1.0];
+                   afterDelay:0.5];
     }
 }
 
@@ -741,7 +741,7 @@
         
         [self performSelector:@selector(checkForRemainingFirefoxProcesses) 
                    withObject:nil 
-                   afterDelay:1.0];
+                   afterDelay:0.5];
     } else {
         NSDebugLog(@"No Firefox processes remaining, terminating wrapper");
         [NSApp terminate:self];
