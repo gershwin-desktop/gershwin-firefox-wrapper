@@ -2,6 +2,7 @@
 #import <sys/types.h>
 #import <sys/sysctl.h>
 #import <sys/user.h>
+#import <signal.h>
 
 @implementation FirefoxLauncher
 
@@ -13,53 +14,57 @@
         isFirefoxRunning = NO;
         firefoxTask = nil;
         serviceConnection = nil;
+        monitoringTimer = nil;
+        shouldTerminateWhenFirefoxQuits = YES;
     }
     return self;
 }
 
-- (BOOL)isFirefoxCurrentlyRunning 
+// Enhanced process detection that returns all Firefox PIDs
+- (NSArray *)getAllFirefoxProcessIDs
 {
     int mib[4];
     size_t size;
     struct kinfo_proc *procs;
     int nprocs;
+    NSMutableArray *firefoxPIDs = [[NSMutableArray alloc] init];
     
-    // Get the size needed for process list
     mib[0] = CTL_KERN;
     mib[1] = KERN_PROC;
     mib[2] = KERN_PROC_PROC;
     mib[3] = 0;
     
     if (sysctl(mib, 4, NULL, &size, NULL, 0) < 0) {
-        return NO;
+        return [firefoxPIDs autorelease];
     }
     
-    // Allocate memory for process list
     procs = malloc(size);
     if (procs == NULL) {
-        return NO;
+        return [firefoxPIDs autorelease];
     }
     
-    // Get the actual process list
     if (sysctl(mib, 4, procs, &size, NULL, 0) < 0) {
         free(procs);
-        return NO;
+        return [firefoxPIDs autorelease];
     }
     
     nprocs = size / sizeof(struct kinfo_proc);
     
-    BOOL found = NO;
     for (int i = 0; i < nprocs; i++) {
-        // Get command line arguments for this process
         NSString *execPath = [self getExecutablePathForPID:procs[i].ki_pid];
         if (execPath && [execPath isEqualToString:firefoxExecutablePath]) {
-            found = YES;
-            break;
+            [firefoxPIDs addObject:@(procs[i].ki_pid)];
         }
     }
     
     free(procs);
-    return found;
+    return [firefoxPIDs autorelease];
+}
+
+- (BOOL)isFirefoxCurrentlyRunning 
+{
+    NSArray *pids = [self getAllFirefoxProcessIDs];
+    return [pids count] > 0;
 }
 
 - (NSString *)getExecutablePathForPID:(pid_t)pid
@@ -84,6 +89,157 @@
     
     free(args);
     return nil;
+}
+
+// Enhanced monitoring with adaptive intervals and dock status support
+- (void)startSmartFirefoxMonitoring
+{
+    [self stopFirefoxMonitoring]; // Stop any existing timer
+    
+    NSDebugLog(@"Starting smart Firefox monitoring with dock status support");
+    
+    // Initialize the static variable properly
+    static BOOL hasInitialized = NO;
+    if (!hasInitialized) {
+        // Set initial state for monitoring
+        hasInitialized = YES;
+    }
+    
+    // Use shorter intervals when we expect state changes, longer when stable
+    NSTimeInterval interval = 0.5; // Start with 0.5 second for better responsiveness
+    
+    monitoringTimer = [NSTimer scheduledTimerWithTimeInterval:interval
+                                                       target:self
+                                                     selector:@selector(smartFirefoxCheck:)
+                                                     userInfo:nil
+                                                      repeats:YES];
+}
+
+- (void)stopFirefoxMonitoring
+{
+    if (monitoringTimer) {
+        [monitoringTimer invalidate];
+        monitoringTimer = nil;
+        NSDebugLog(@"Firefox monitoring stopped");
+    }
+}
+
+- (void)smartFirefoxCheck:(NSTimer *)timer
+{
+    NSArray *firefoxPIDs = [self getAllFirefoxProcessIDs];
+    BOOL firefoxRunning = [firefoxPIDs count] > 0;
+    
+    static BOOL wasRunning = NO; // Initialize to NO instead of YES
+    static BOOL firstRun = YES;
+    static int stableStateCount = 0;
+    
+    // Update our internal state
+    isFirefoxRunning = firefoxRunning;
+    
+    // On first run, just set the initial state without triggering actions
+    if (firstRun) {
+        wasRunning = firefoxRunning;
+        firstRun = NO;
+        NSDebugLog(@"Initial Firefox state: %@", firefoxRunning ? @"running" : @"not running");
+        return;
+    }
+    
+    if (wasRunning != firefoxRunning) {
+        // State changed - handle it
+        stableStateCount = 0;
+        
+        if (wasRunning && !firefoxRunning) {
+            NSDebugLog(@"Firefox stopped - all processes terminated");
+            
+            // Post termination notification for dock status
+            NSDictionary *terminationInfo = @{
+                @"NSApplicationName": @"Firefox",
+                @"NSApplicationPath": [[NSBundle mainBundle] bundlePath]
+            };
+            
+            [[NSNotificationCenter defaultCenter] 
+                postNotificationName:NSWorkspaceDidTerminateApplicationNotification
+                              object:[NSWorkspace sharedWorkspace]
+                            userInfo:terminationInfo];
+            
+            if (shouldTerminateWhenFirefoxQuits) {
+                [timer invalidate];
+                monitoringTimer = nil;
+                [NSApp terminate:self];
+                return;
+            }
+        } else if (!wasRunning && firefoxRunning) {
+            NSDebugLog(@"Firefox started - detected %lu processes", (unsigned long)[firefoxPIDs count]);
+            
+            // Post launch notification for dock status
+            NSDictionary *launchInfo = @{
+                @"NSApplicationName": @"Firefox",
+                @"NSApplicationPath": [[NSBundle mainBundle] bundlePath]
+            };
+            
+            [[NSNotificationCenter defaultCenter] 
+                postNotificationName:NSWorkspaceDidLaunchApplicationNotification
+                              object:[NSWorkspace sharedWorkspace]
+                            userInfo:launchInfo];
+        }
+        
+        wasRunning = firefoxRunning;
+        
+        // Reset to shorter interval after state change
+        [timer invalidate];
+        monitoringTimer = [NSTimer scheduledTimerWithTimeInterval:0.5
+                                                           target:self
+                                                         selector:@selector(smartFirefoxCheck:)
+                                                         userInfo:nil
+                                                          repeats:YES];
+    } else {
+        // State is stable - increase interval to reduce CPU usage
+        stableStateCount++;
+        
+        if (stableStateCount > 10) { // After 5 seconds of stability
+            [timer invalidate];
+            monitoringTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 // Check every 2 seconds
+                                                               target:self
+                                                             selector:@selector(smartFirefoxCheck:)
+                                                             userInfo:nil
+                                                              repeats:YES];
+            stableStateCount = 0; // Reset counter
+        }
+    }
+}
+
+// Synchronous wait for Firefox to quit (useful for termination)
+- (BOOL)waitForFirefoxToQuit:(NSTimeInterval)timeout
+{
+    NSDate *startTime = [NSDate date];
+    
+    while ([[NSDate date] timeIntervalSinceDate:startTime] < timeout) {
+        if (![self isFirefoxCurrentlyRunning]) {
+            return YES;
+        }
+        
+        // Small sleep to avoid busy waiting
+        usleep(100000); // 0.1 seconds
+    }
+    
+    return NO;
+}
+
+- (void)scheduleFirefoxTerminationCheck
+{
+    // Schedule one final check to terminate wrapper
+    [self performSelector:@selector(finalTerminationCheck) withObject:nil afterDelay:1.0];
+}
+
+- (void)finalTerminationCheck
+{
+    if (![self isFirefoxCurrentlyRunning]) {
+        NSDebugLog(@"All Firefox processes terminated, terminating wrapper");
+        [NSApp terminate:self];
+    } else {
+        NSDebugLog(@"Some Firefox processes still running, scheduling another check");
+        [self performSelector:@selector(finalTerminationCheck) withObject:nil afterDelay:1.0];
+    }
 }
 
 - (void)applicationWillFinishLaunching:(NSNotification *)notification
@@ -129,35 +285,9 @@
         [self launchFirefox];
     }
     
-    [self startPeriodicFirefoxMonitoring];
+    [self startSmartFirefoxMonitoring];
     
     NSDebugLog(@"=== DEBUG: Application setup complete ===");
-}
-
-- (void)startPeriodicFirefoxMonitoring
-{
-    NSDebugLog(@"Starting Firefox monitoring (0.5 second intervals)");
-    
-    [NSTimer scheduledTimerWithTimeInterval:0.5
-                                     target:self
-                                   selector:@selector(periodicFirefoxCheck:)
-                                   userInfo:nil
-                                    repeats:YES];
-}
-
-- (void)periodicFirefoxCheck:(NSTimer *)timer
-{
-    BOOL firefoxRunning = [self isFirefoxCurrentlyRunning];
-    
-    static BOOL wasRunning = YES;
-    
-    if (wasRunning && !firefoxRunning) {
-        NSDebugLog(@"Firefox stopped - terminating wrapper");
-        [timer invalidate];
-        [NSApp terminate:self];
-    }
-    
-    wasRunning = firefoxRunning;
 }
 
 #pragma mark - GWorkspace Integration Methods
@@ -412,13 +542,17 @@
     NSDebugLog(@"=== DEBUG: State change notification posted ===");
 }
 
+// Enhanced termination with smart waiting
 - (void)terminate:(id)sender
 {
     NSDebugLog(@"=== DEBUG: GWorkspace requesting Firefox termination ===");
     
-    if ([self isFirefoxCurrentlyRunning]) {
-        NSDebugLog(@"Terminating all Firefox processes gracefully");
+    NSArray *firefoxPIDs = [self getAllFirefoxProcessIDs];
+    
+    if ([firefoxPIDs count] > 0) {
+        NSDebugLog(@"Terminating %lu Firefox processes gracefully", (unsigned long)[firefoxPIDs count]);
         
+        // Try graceful termination first
         NSTask *quitTask = [[NSTask alloc] init];
         [quitTask setLaunchPath:@"/usr/local/bin/wmctrl"];
         [quitTask setArguments:@[@"-c", @"Firefox"]];
@@ -429,12 +563,38 @@
             [quitTask launch];
             [quitTask waitUntilExit];
             NSDebugLog(@"Sent close command to Firefox windows");
-            
         NS_HANDLER
             NSDebugLog(@"Failed to send close command: %@", localException);
         NS_ENDHANDLER
         
         [quitTask release];
+        
+        // Wait for graceful termination
+        if ([self waitForFirefoxToQuit:5.0]) {
+            NSDebugLog(@"Firefox terminated gracefully");
+        } else {
+            NSDebugLog(@"Firefox didn't quit gracefully, checking for remaining processes");
+            
+            // Force kill remaining processes if necessary
+            NSArray *remainingPIDs = [self getAllFirefoxProcessIDs];
+            for (NSNumber *pidNumber in remainingPIDs) {
+                pid_t pid = [pidNumber intValue];
+                NSDebugLog(@"Force killing Firefox process %d", pid);
+                kill(pid, SIGTERM);
+            }
+            
+            // Wait a bit more and then SIGKILL if necessary
+            if (![self waitForFirefoxToQuit:2.0]) {
+                remainingPIDs = [self getAllFirefoxProcessIDs];
+                for (NSNumber *pidNumber in remainingPIDs) {
+                    pid_t pid = [pidNumber intValue];
+                    NSDebugLog(@"Force killing Firefox process %d with SIGKILL", pid);
+                    kill(pid, SIGKILL);
+                }
+            }
+        }
+        
+        [self scheduleFirefoxTerminationCheck];
     } else {
         NSDebugLog(@"No Firefox processes running, terminating wrapper immediately");
         [NSApp terminate:self];
@@ -738,8 +898,10 @@
     NSTask *task = [notification object];
     
     if (task == firefoxTask) {
-        NSDebugLog(@"=== DEBUG: Firefox process terminated (PID: %d) ===", [task processIdentifier]);
-        isFirefoxRunning = NO;
+        NSDebugLog(@"=== DEBUG: Our Firefox task terminated (PID: %d) ===", [task processIdentifier]);
+        
+        // Don't set isFirefoxRunning = NO here - let smartFirefoxCheck handle it
+        // This allows for proper dock status management through the monitoring system
         
         NSDictionary *terminationInfo = @{
             @"NSApplicationName": @"Firefox",
@@ -758,9 +920,8 @@
         [firefoxTask release];
         firefoxTask = nil;
         
-        [self performSelector:@selector(checkForRemainingFirefoxProcesses) 
-                   withObject:nil 
-                   afterDelay:0.5];
+        // Let the smart monitoring system handle the rest
+        NSDebugLog(@"Our Firefox task ended, smart monitoring will handle remaining processes");
     }
 }
 
@@ -819,6 +980,8 @@
 {
     NSDebugLog(@"=== DEBUG: Firefox launcher will terminate ===");
     
+    [self stopFirefoxMonitoring];
+    
     if (serviceConnection) {
         [serviceConnection invalidate];
         serviceConnection = nil;
@@ -837,6 +1000,8 @@
 
 - (void)dealloc
 {
+    [self stopFirefoxMonitoring];
+    
     if (firefoxTask) {
         [[NSNotificationCenter defaultCenter] removeObserver:self 
                                                         name:NSTaskDidTerminateNotification 

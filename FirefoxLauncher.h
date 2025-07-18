@@ -1,3 +1,4 @@
+// FirefoxLauncher.h
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
 
@@ -7,6 +8,8 @@
     BOOL isFirefoxRunning;
     NSTask *firefoxTask;
     NSConnection *serviceConnection;
+    NSTimer *monitoringTimer;
+    BOOL shouldTerminateWhenFirefoxQuits;
 }
 
 // Application lifecycle
@@ -23,6 +26,15 @@
 - (void)handleFirefoxTermination:(NSNotification *)notification;
 - (void)checkForRemainingFirefoxProcesses;
 
+// Enhanced monitoring methods
+- (void)startSmartFirefoxMonitoring;
+- (void)stopFirefoxMonitoring;
+- (void)smartFirefoxCheck:(NSTimer *)timer;
+- (NSArray *)getAllFirefoxProcessIDs;
+- (BOOL)waitForFirefoxToQuit:(NSTimeInterval)timeout;
+- (void)scheduleFirefoxTerminationCheck;
+- (void)finalTerminationCheck;
+
 // GWorkspace integration methods
 - (void)activateIgnoringOtherApps:(BOOL)flag;
 - (void)hide:(id)sender;
@@ -37,9 +49,8 @@
 - (BOOL)activateFirefoxWithWmctrl;
 - (void)waitForFirefoxToStart;
 - (void)notifyGWorkspaceOfStateChange;
-- (void)startPeriodicFirefoxMonitoring;
-- (void)periodicFirefoxCheck:(NSTimer *)timer;
 - (BOOL)isRunning;
 - (NSNumber *)processIdentifier;
+- (NSString *)getExecutablePathForPID:(pid_t)pid;
 
 @end
