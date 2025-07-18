@@ -15,13 +15,13 @@
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)theApplication hasVisibleWindows:(BOOL)flag;
 - (void)applicationWillTerminate:(NSNotification *)notification;
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender;
-- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender;
 
 // Firefox management
 - (void)launchFirefox;
 - (BOOL)isFirefoxCurrentlyRunning;
 - (void)activateFirefoxWindows;
 - (void)handleFirefoxTermination:(NSNotification *)notification;
+- (void)checkForRemainingFirefoxProcesses;
 
 // GWorkspace integration methods
 - (void)activateIgnoringOtherApps:(BOOL)flag;
@@ -38,6 +38,7 @@
 - (void)activateFirefoxWithXdotool;
 - (void)waitForFirefoxToStart;
 - (void)forceQuitIfNeeded;
+- (void)forceQuitFirefoxAndExit;
 - (BOOL)isRunning;
 - (NSNumber *)processIdentifier;
 

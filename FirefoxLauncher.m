@@ -134,7 +134,39 @@
         [self launchFirefox];
     }
     
+    // Start periodic monitoring of Firefox processes
+    [self startPeriodicFirefoxMonitoring];
+    
     NSLog(@"=== DEBUG: Application setup complete ===");
+}
+
+- (void)startPeriodicFirefoxMonitoring
+{
+    NSLog(@"=== DEBUG: Starting periodic Firefox monitoring ===");
+    
+    // Check every 2 seconds if Firefox is still running
+    [NSTimer scheduledTimerWithTimeInterval:2.0
+                                     target:self
+                                   selector:@selector(periodicFirefoxCheck:)
+                                   userInfo:nil
+                                    repeats:YES];
+}
+
+- (void)periodicFirefoxCheck:(NSTimer *)timer
+{
+    BOOL firefoxStillRunning = [self isFirefoxCurrentlyRunning];
+    
+    static BOOL lastFirefoxState = YES; // Assume it was running when we started
+    
+    if (lastFirefoxState && !firefoxStillRunning) {
+        NSLog(@"=== DEBUG: Firefox processes have stopped, terminating wrapper ===");
+        [timer invalidate]; // Stop the timer
+        [NSApp terminate:self];
+    } else if (!lastFirefoxState && firefoxStillRunning) {
+        NSLog(@"=== DEBUG: Firefox processes detected again ===");
+    }
+    
+    lastFirefoxState = firefoxStillRunning;
 }
 
 #pragma mark - GWorkspace Integration Methods
@@ -333,9 +365,11 @@
 
 - (void)terminate:(id)sender
 {
-    NSLog(@"GWorkspace requesting Firefox termination");
+    NSLog(@"=== DEBUG: GWorkspace requesting Firefox termination ===");
     
     if ([self isFirefoxCurrentlyRunning]) {
+        NSLog(@"Terminating all Firefox processes");
+        
         // Try graceful shutdown first
         NSTask *quitTask = [[NSTask alloc] init];
         [quitTask setLaunchPath:@"/usr/local/bin/xdotool"];
@@ -361,7 +395,35 @@
         NS_ENDHANDLER
         
         [quitTask release];
+    } else {
+        NSLog(@"No Firefox processes running, terminating wrapper immediately");
+        [NSApp terminate:self];
     }
+}
+
+- (void)forceQuitFirefoxAndExit
+{
+    NSLog(@"=== DEBUG: Force quitting Firefox and exiting wrapper ===");
+    
+    // Force quit all Firefox processes
+    NSTask *killTask = [[NSTask alloc] init];
+    [killTask setLaunchPath:@"/usr/bin/pkill"];
+    [killTask setArguments:@[@"-f", @"firefox"]];
+    [killTask setStandardOutput:[NSPipe pipe]];
+    [killTask setStandardError:[NSPipe pipe]];
+    
+    NS_DURING
+        [killTask launch];
+        [killTask waitUntilExit];
+        NSLog(@"Force killed Firefox processes");
+    NS_HANDLER
+        NSLog(@"Failed to force kill Firefox: %@", localException);
+    NS_ENDHANDLER
+    
+    [killTask release];
+    
+    // Terminate wrapper
+    [NSApp terminate:self];
 }
 
 - (void)forceQuitIfNeeded
@@ -779,10 +841,12 @@
 
 - (BOOL)isFirefoxCurrentlyRunning
 {
+    // First check our managed task
     if (firefoxTask && [firefoxTask isRunning]) {
         return YES;
     }
     
+    // Also check for any Firefox processes we didn't launch or that might have respawned
     NSTask *task = [[NSTask alloc] init];
     [task setLaunchPath:@"/usr/bin/pgrep"];
     [task setArguments:@[@"-f", @"firefox"]];
@@ -797,8 +861,18 @@
         [task waitUntilExit];
         
         if ([task terminationStatus] == 0) {
-            running = YES;
-            NSLog(@"Firefox process found via pgrep");
+            // Get the process list to see what we found
+            NSData *data = [[pipe fileHandleForReading] readDataToEndOfFile];
+            NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            NSString *trimmedOutput = [output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            
+            if ([trimmedOutput length] > 0) {
+                NSLog(@"Firefox processes found: %@", trimmedOutput);
+                running = YES;
+            }
+            [output release];
+        } else {
+            NSLog(@"No Firefox processes found via pgrep");
         }
     NS_HANDLER
         NSLog(@"pgrep command failed: %@", localException);
@@ -835,8 +909,27 @@
         [firefoxTask release];
         firefoxTask = nil;
         
-        NSLog(@"=== DEBUG: Firefox has quit, but wrapper staying running ===");
-        // DO NOT terminate the wrapper - keep it running for future launches
+        // Wait a moment for process cleanup, then check if any Firefox processes remain
+        [self performSelector:@selector(checkForRemainingFirefoxProcesses) 
+                   withObject:nil 
+                   afterDelay:1.0];
+    }
+}
+
+- (void)checkForRemainingFirefoxProcesses
+{
+    NSLog(@"=== DEBUG: Checking for remaining Firefox processes ===");
+    
+    if ([self isFirefoxCurrentlyRunning]) {
+        NSLog(@"Other Firefox processes still running, keeping wrapper alive");
+        
+        // Start monitoring the remaining processes
+        [self performSelector:@selector(checkForRemainingFirefoxProcesses) 
+                   withObject:nil 
+                   afterDelay:2.0];
+    } else {
+        NSLog(@"No Firefox processes remaining, terminating wrapper");
+        [NSApp terminate:self];
     }
 }
 
@@ -867,14 +960,19 @@
 {
     NSLog(@"=== DEBUG: Application termination requested ===");
     
-    // For now, let's just refuse to terminate to see what's trying to quit us
-    NSLog(@"Refusing termination to keep wrapper running");
-    return NSTerminateCancel;
+    // Check if any Firefox processes are still running
+    if ([self isFirefoxCurrentlyRunning]) {
+        NSLog(@"Firefox is still running, refusing termination");
+        return NSTerminateCancel;
+    } else {
+        NSLog(@"No Firefox processes running, allowing termination");
+        return NSTerminateNow;
+    }
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification
 {
-    NSLog(@"Firefox launcher will terminate");
+    NSLog(@"=== DEBUG: Firefox launcher will terminate ===");
     
     if (serviceConnection) {
         [serviceConnection invalidate];
@@ -889,6 +987,8 @@
         [firefoxTask release];
         firefoxTask = nil;
     }
+    
+    NSLog(@"=== DEBUG: Firefox launcher cleanup complete ===");
 }
 
 - (void)dealloc
