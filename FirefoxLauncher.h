@@ -37,8 +37,6 @@
 - (BOOL)activateFirefoxWithWmctrl;
 - (void)waitForFirefoxToStart;
 - (void)notifyGWorkspaceOfStateChange;
-- (void)forceQuitIfNeeded;
-- (void)forceQuitFirefoxAndExit;
 - (void)startPeriodicFirefoxMonitoring;
 - (void)periodicFirefoxCheck:(NSTimer *)timer;
 - (BOOL)isRunning;

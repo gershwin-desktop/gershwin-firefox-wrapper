@@ -64,9 +64,9 @@
 
 - (void)startPeriodicFirefoxMonitoring
 {
-    NSDebugLog(@"Starting Firefox monitoring (5 second intervals)");
+    NSDebugLog(@"Starting Firefox monitoring (1 second intervals)");
     
-    [NSTimer scheduledTimerWithTimeInterval:5.0
+    [NSTimer scheduledTimerWithTimeInterval:1.0
                                      target:self
                                    selector:@selector(periodicFirefoxCheck:)
                                    userInfo:nil
@@ -362,7 +362,7 @@
     NSDebugLog(@"=== DEBUG: GWorkspace requesting Firefox termination ===");
     
     if ([self isFirefoxCurrentlyRunning]) {
-        NSDebugLog(@"Terminating all Firefox processes");
+        NSDebugLog(@"Terminating all Firefox processes gracefully");
         
         NSTask *quitTask = [[NSTask alloc] init];
         [quitTask setLaunchPath:@"/usr/local/bin/wmctrl"];
@@ -375,14 +375,8 @@
             [quitTask waitUntilExit];
             NSDebugLog(@"Sent close command to Firefox windows");
             
-            [self performSelector:@selector(forceQuitIfNeeded) withObject:nil afterDelay:3.0];
-            
         NS_HANDLER
             NSDebugLog(@"Failed to send close command: %@", localException);
-            
-            if (firefoxTask && [firefoxTask isRunning]) {
-                [firefoxTask terminate];
-            }
         NS_ENDHANDLER
         
         [quitTask release];
@@ -392,36 +386,7 @@
     }
 }
 
-- (void)forceQuitFirefoxAndExit
-{
-    NSDebugLog(@"=== DEBUG: Force quitting Firefox and exiting wrapper ===");
-    
-    NSTask *killTask = [[NSTask alloc] init];
-    [killTask setLaunchPath:@"/usr/bin/pkill"];
-    [killTask setArguments:@[@"-f", @"firefox"]];
-    [killTask setStandardOutput:[NSPipe pipe]];
-    [killTask setStandardError:[NSPipe pipe]];
-    
-    NS_DURING
-        [killTask launch];
-        [killTask waitUntilExit];
-        NSDebugLog(@"Force killed Firefox processes");
-    NS_HANDLER
-        NSDebugLog(@"Failed to force kill Firefox: %@", localException);
-    NS_ENDHANDLER
-    
-    [killTask release];
-    
-    [NSApp terminate:self];
-}
 
-- (void)forceQuitIfNeeded
-{
-    if ([self isFirefoxCurrentlyRunning] && firefoxTask && [firefoxTask isRunning]) {
-        NSDebugLog(@"Firefox didn't quit gracefully, force terminating");
-        [firefoxTask terminate];
-    }
-}
 
 - (BOOL)isRunning
 {
@@ -776,7 +741,7 @@
         
         [self performSelector:@selector(checkForRemainingFirefoxProcesses) 
                    withObject:nil 
-                   afterDelay:2.0];
+                   afterDelay:1.0];
     } else {
         NSDebugLog(@"No Firefox processes remaining, terminating wrapper");
         [NSApp terminate:self];
