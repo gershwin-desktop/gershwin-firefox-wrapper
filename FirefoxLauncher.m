@@ -1,4 +1,7 @@
 #import "FirefoxLauncher.h"
+#import <sys/types.h>
+#import <sys/sysctl.h>
+#import <sys/user.h>
 
 @implementation FirefoxLauncher
 
@@ -12,6 +15,75 @@
         serviceConnection = nil;
     }
     return self;
+}
+
+- (BOOL)isFirefoxCurrentlyRunning 
+{
+    int mib[4];
+    size_t size;
+    struct kinfo_proc *procs;
+    int nprocs;
+    
+    // Get the size needed for process list
+    mib[0] = CTL_KERN;
+    mib[1] = KERN_PROC;
+    mib[2] = KERN_PROC_PROC;
+    mib[3] = 0;
+    
+    if (sysctl(mib, 4, NULL, &size, NULL, 0) < 0) {
+        return NO;
+    }
+    
+    // Allocate memory for process list
+    procs = malloc(size);
+    if (procs == NULL) {
+        return NO;
+    }
+    
+    // Get the actual process list
+    if (sysctl(mib, 4, procs, &size, NULL, 0) < 0) {
+        free(procs);
+        return NO;
+    }
+    
+    nprocs = size / sizeof(struct kinfo_proc);
+    
+    BOOL found = NO;
+    for (int i = 0; i < nprocs; i++) {
+        // Get command line arguments for this process
+        NSString *execPath = [self getExecutablePathForPID:procs[i].ki_pid];
+        if (execPath && [execPath isEqualToString:firefoxExecutablePath]) {
+            found = YES;
+            break;
+        }
+    }
+    
+    free(procs);
+    return found;
+}
+
+- (NSString *)getExecutablePathForPID:(pid_t)pid
+{
+    int mib[4];
+    size_t size = ARG_MAX;
+    char *args = malloc(size);
+    
+    if (args == NULL) return nil;
+    
+    mib[0] = CTL_KERN;
+    mib[1] = KERN_PROC;
+    mib[2] = KERN_PROC_ARGS;
+    mib[3] = pid;
+    
+    if (sysctl(mib, 4, args, &size, NULL, 0) == 0) {
+        // First argument is the executable path
+        NSString *result = [NSString stringWithUTF8String:args];
+        free(args);
+        return result;
+    }
+    
+    free(args);
+    return nil;
 }
 
 - (void)applicationWillFinishLaunching:(NSNotification *)notification
@@ -75,24 +147,7 @@
 
 - (void)periodicFirefoxCheck:(NSTimer *)timer
 {
-    NSTask *task = [[NSTask alloc] init];
-    [task setLaunchPath:@"/usr/bin/pgrep"];
-    [task setArguments:@[@"-f", @"firefox"]];
-    [task setStandardOutput:[NSPipe pipe]];
-    [task setStandardError:[NSPipe pipe]];
-    
-    BOOL firefoxRunning = NO;
-    
-    NS_DURING
-        [task launch];
-        [task waitUntilExit];
-        firefoxRunning = ([task terminationStatus] == 0);
-    NS_HANDLER
-        NSDebugLog(@"Firefox check failed: %@", localException);
-        firefoxRunning = NO;
-    NS_ENDHANDLER
-    
-    [task release];
+    BOOL firefoxRunning = [self isFirefoxCurrentlyRunning];
     
     static BOOL wasRunning = YES;
     
@@ -386,8 +441,6 @@
     }
 }
 
-
-
 - (BOOL)isRunning
 {
     return [self isFirefoxCurrentlyRunning];
@@ -678,27 +731,6 @@
         
         [NSApp terminate:self];
     NS_ENDHANDLER
-}
-
-- (BOOL)isFirefoxCurrentlyRunning
-{
-    NSTask *task = [[NSTask alloc] init];
-    [task setLaunchPath:@"/usr/bin/pgrep"];
-    [task setArguments:@[@"-f", @"firefox"]];
-    [task setStandardOutput:[NSPipe pipe]];
-    [task setStandardError:[NSPipe pipe]];
-    
-    BOOL running = NO;
-    NS_DURING
-        [task launch];
-        [task waitUntilExit];
-        running = ([task terminationStatus] == 0);
-    NS_HANDLER
-        running = NO;
-    NS_ENDHANDLER
-    
-    [task release];
-    return running;
 }
 
 - (void)handleFirefoxTermination:(NSNotification *)notification
