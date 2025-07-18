@@ -6,7 +6,12 @@
 {
     self = [super init];
     if (self) {
-        firefoxExecutablePath = @"/usr/local/bin/firefox";
+        // Point to the real Firefox we moved
+        firefoxExecutablePath = @"/Applications/Firefox-real.app/Contents/MacOS/firefox";
+        // Fallback to system Firefox if real one not found
+        if (![[NSFileManager defaultManager] fileExistsAtPath:firefoxExecutablePath]) {
+            firefoxExecutablePath = @"/usr/local/bin/firefox";
+        }
         isFirefoxRunning = NO;
         firefoxTask = nil;
         serviceConnection = nil;
@@ -16,6 +21,28 @@
 
 - (void)applicationWillFinishLaunching:(NSNotification *)notification
 {
+    NSLog(@"=== DEBUG: Firefox wrapper starting up ===");
+    
+    // Force the process name to be Firefox
+    [[NSProcessInfo processInfo] setProcessName:@"Firefox"];
+    
+    // Debug bundle information
+    NSBundle *bundle = [NSBundle mainBundle];
+    NSLog(@"Bundle path: %@", [bundle bundlePath]);
+    NSLog(@"Bundle identifier: %@", [bundle bundleIdentifier]);
+    NSLog(@"Bundle name: %@", [bundle objectForInfoDictionaryKey:@"CFBundleName"]);
+    NSLog(@"Bundle display name: %@", [bundle objectForInfoDictionaryKey:@"CFBundleDisplayName"]);
+    NSLog(@"Bundle executable: %@", [bundle objectForInfoDictionaryKey:@"CFBundleExecutable"]);
+    NSLog(@"Executable path: %@", [bundle executablePath]);
+    NSLog(@"Process name: %@", [[NSProcessInfo processInfo] processName]);
+    
+    // Check what GWorkspace might find when looking for "Firefox"
+    NSWorkspace *ws = [NSWorkspace sharedWorkspace];
+    NSString *firefoxPath = [ws fullPathForApplication:@"Firefox"];
+    NSLog(@"GWorkspace thinks Firefox is at: %@", firefoxPath);
+    NSLog(@"Our actual path: %@", [bundle bundlePath]);
+    NSLog(@"Paths match: %@", [firefoxPath isEqualToString:[bundle bundlePath]] ? @"YES" : @"NO");
+    
     NSString *iconPath = [[NSBundle mainBundle] pathForResource:@"Firefox" ofType:@"png"];
     if (iconPath && [[NSFileManager defaultManager] fileExistsAtPath:iconPath]) {
         NSImage *icon = [[NSImage alloc] initWithContentsOfFile:iconPath];
@@ -31,28 +58,74 @@
     // Register as "Firefox" so GWorkspace can find us
     NSString *appName = @"Firefox";
     
+    NSLog(@"Attempting to register distributed object as '%@'", appName);
+    
     if (![serviceConnection registerName:appName]) {
+        NSLog(@"Registration failed - checking for existing instance");
         NSConnection *existing = [NSConnection connectionWithRegisteredName:appName host:nil];
         if (existing) {
             NSLog(@"Firefox launcher already running, activating existing instance");
             
             // Try to contact the existing wrapper to activate Firefox
             id proxy = [existing rootProxy];
+            NSLog(@"Got proxy: %@", proxy);
             if (proxy && [proxy respondsToSelector:@selector(activateIgnoringOtherApps:)]) {
+                NSLog(@"Calling activateIgnoringOtherApps on existing instance");
                 [proxy activateIgnoringOtherApps:YES];
             } else {
+                NSLog(@"Proxy doesn't respond to activateIgnoringOtherApps, trying direct activation");
                 // Fallback to direct activation
                 [self activateFirefoxWindows];
             }
+            
+            // Exit gracefully instead of hard exit
+            [NSApp terminate:self];
+            return; // Don't continue with initialization
+        } else {
+            NSLog(@"No existing connection found, but registration still failed");
+            // Don't exit here - maybe we can still work without distributed objects
+            NSLog(@"Continuing without distributed objects registration");
         }
-        exit(0);
+    } else {
+        NSLog(@"Firefox launcher successfully registered as '%@'", appName);
+        NSLog(@"Service connection: %@", serviceConnection);
+        NSLog(@"Root object: %@", [serviceConnection rootObject]);
     }
-    
-    NSLog(@"Firefox launcher initialized and registered as '%@'", appName);
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification
 {
+    NSLog(@"=== DEBUG: Application finished launching ===");
+    
+    // Test if GWorkspace can find us
+    NSWorkspace *ws = [NSWorkspace sharedWorkspace];
+    NSString *ourPath = [[NSBundle mainBundle] bundlePath];
+    NSArray *runningApps = [ws runningApplications];
+    
+    NSLog(@"Currently running applications:");
+    for (NSDictionary *app in runningApps) {
+        NSString *name = [app objectForKey:@"NSApplicationName"];
+        NSString *path = [app objectForKey:@"NSApplicationPath"];
+        NSLog(@"  %@ at %@", name, path);
+        
+        if ([name isEqualToString:@"Firefox"]) {
+            NSLog(@"  *** Found Firefox in running apps! Path: %@", path);
+            NSLog(@"  *** Matches our path: %@", [path isEqualToString:ourPath] ? @"YES" : @"NO");
+        }
+    }
+    
+    // Test distributed objects registration
+    NSConnection *testConnection = [NSConnection connectionWithRegisteredName:@"Firefox" host:nil];
+    if (testConnection) {
+        id proxy = [testConnection rootProxy];
+        NSLog(@"Distributed object 'Firefox' found: %@", proxy);
+        NSLog(@"Proxy class: %@", [proxy class]);
+        NSLog(@"Responds to activateIgnoringOtherApps: %@", 
+              [proxy respondsToSelector:@selector(activateIgnoringOtherApps:)] ? @"YES" : @"NO");
+    } else {
+        NSLog(@"No distributed object named 'Firefox' found");
+    }
+    
     if ([self isFirefoxCurrentlyRunning]) {
         NSLog(@"Firefox is already running");
         [self activateFirefoxWindows];
@@ -60,68 +133,154 @@
         NSLog(@"Firefox not running, launching it");
         [self launchFirefox];
     }
+    
+    NSLog(@"=== DEBUG: Application setup complete ===");
 }
 
 #pragma mark - GWorkspace Integration Methods
 
 - (void)activateIgnoringOtherApps:(BOOL)flag
 {
-    NSLog(@"GWorkspace requesting Firefox activation (ignoreOthers: %@)", flag ? @"YES" : @"NO");
+    NSLog(@"=== DEBUG: GWorkspace requesting Firefox activation (ignoreOthers: %@) ===", flag ? @"YES" : @"NO");
+    NSLog(@"Current Firefox running state: %@", [self isFirefoxCurrentlyRunning] ? @"YES" : @"NO");
     
     if ([self isFirefoxCurrentlyRunning]) {
+        NSLog(@"Firefox is running, activating windows");
         [self activateFirefoxWindows];
+        // Notify that we're no longer hidden
+        [self notifyGWorkspaceOfStateChange];
     } else {
         NSLog(@"Firefox not running, launching it first");
         [self launchFirefox];
     }
+    
+    NSLog(@"=== DEBUG: Activation request completed ===");
 }
 
 - (void)hide:(id)sender
 {
-    NSLog(@"GWorkspace requesting Firefox hide");
+    NSLog(@"=== DEBUG: GWorkspace requesting Firefox hide ===");
     
-    // Use xdotool to minimize all Firefox windows
-    NSTask *hideTask = [[NSTask alloc] init];
-    [hideTask setLaunchPath:@"/usr/local/bin/xdotool"];
-    [hideTask setArguments:@[@"search", @"--class", @"firefox", @"windowminimize", @"%@"]];
-    [hideTask setStandardOutput:[NSPipe pipe]];
-    [hideTask setStandardError:[NSPipe pipe]];
+    // First, get all Firefox window IDs
+    NSTask *searchTask = [[NSTask alloc] init];
+    [searchTask setLaunchPath:@"/usr/local/bin/xdotool"];
+    [searchTask setArguments:@[@"search", @"--class", @"firefox"]];
+    
+    NSPipe *searchPipe = [NSPipe pipe];
+    [searchTask setStandardOutput:searchPipe];
+    [searchTask setStandardError:[NSPipe pipe]];
     
     NS_DURING
-        [hideTask launch];
-        [hideTask waitUntilExit];
-        NSLog(@"Firefox windows minimized");
+        [searchTask launch];
+        [searchTask waitUntilExit];
+        
+        if ([searchTask terminationStatus] == 0) {
+            NSData *data = [[searchPipe fileHandleForReading] readDataToEndOfFile];
+            NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            NSArray *windowIDs = [[output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsSeparatedByString:@"\n"];
+            [output release];
+            
+            NSLog(@"Found %lu Firefox windows to hide", (unsigned long)[windowIDs count]);
+            
+            // Minimize each window individually
+            for (NSString *windowID in windowIDs) {
+                if ([windowID length] > 0) {
+                    NSLog(@"Minimizing window: %@", windowID);
+                    NSTask *minimizeTask = [[NSTask alloc] init];
+                    [minimizeTask setLaunchPath:@"/usr/local/bin/xdotool"];
+                    [minimizeTask setArguments:@[@"windowminimize", windowID]];
+                    [minimizeTask setStandardOutput:[NSPipe pipe]];
+                    [minimizeTask setStandardError:[NSPipe pipe]];
+                    
+                    NS_DURING
+                        [minimizeTask launch];
+                        [minimizeTask waitUntilExit];
+                        NSLog(@"Window %@ minimize result: %d", windowID, [minimizeTask terminationStatus]);
+                    NS_HANDLER
+                        NSLog(@"Failed to minimize window %@: %@", windowID, localException);
+                    NS_ENDHANDLER
+                    
+                    [minimizeTask release];
+                }
+            }
+            
+            NSLog(@"Firefox windows minimized (%lu windows)", (unsigned long)[windowIDs count]);
+            [self notifyGWorkspaceOfStateChange];
+        } else {
+            NSLog(@"No Firefox windows found to hide");
+        }
     NS_HANDLER
-        NSLog(@"Failed to minimize Firefox windows: %@", localException);
+        NSLog(@"Failed to search for Firefox windows: %@", localException);
     NS_ENDHANDLER
     
-    [hideTask release];
+    [searchTask release];
+    NSLog(@"=== DEBUG: Hide request completed ===");
 }
 
 - (void)unhideWithoutActivation
 {
-    NSLog(@"GWorkspace requesting Firefox unhide without activation");
+    NSLog(@"=== DEBUG: GWorkspace requesting Firefox unhide without activation ===");
     
-    // Use xdotool to unminimize Firefox windows without bringing to front
-    NSTask *unhideTask = [[NSTask alloc] init];
-    [unhideTask setLaunchPath:@"/usr/local/bin/xdotool"];
-    [unhideTask setArguments:@[@"search", @"--class", @"firefox", @"set_window", @"--property", @"_NET_WM_STATE", @"--remove", @"_NET_WM_STATE_HIDDEN", @"%@"]];
-    [unhideTask setStandardOutput:[NSPipe pipe]];
-    [unhideTask setStandardError:[NSPipe pipe]];
+    // First, get all Firefox window IDs
+    NSTask *searchTask = [[NSTask alloc] init];
+    [searchTask setLaunchPath:@"/usr/local/bin/xdotool"];
+    [searchTask setArguments:@[@"search", @"--class", @"firefox"]];
+    
+    NSPipe *searchPipe = [NSPipe pipe];
+    [searchTask setStandardOutput:searchPipe];
+    [searchTask setStandardError:[NSPipe pipe]];
     
     NS_DURING
-        [unhideTask launch];
-        [unhideTask waitUntilExit];
-        NSLog(@"Firefox windows unhidden");
+        [searchTask launch];
+        [searchTask waitUntilExit];
+        
+        if ([searchTask terminationStatus] == 0) {
+            NSData *data = [[searchPipe fileHandleForReading] readDataToEndOfFile];
+            NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            NSArray *windowIDs = [[output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsSeparatedByString:@"\n"];
+            [output release];
+            
+            NSLog(@"Found %lu Firefox windows to unhide", (unsigned long)[windowIDs count]);
+            
+            // Unminimize each window individually without activation
+            for (NSString *windowID in windowIDs) {
+                if ([windowID length] > 0) {
+                    NSLog(@"Unmapping window: %@", windowID);
+                    NSTask *mapTask = [[NSTask alloc] init];
+                    [mapTask setLaunchPath:@"/usr/local/bin/xdotool"];
+                    [mapTask setArguments:@[@"windowmap", windowID]];
+                    [mapTask setStandardOutput:[NSPipe pipe]];
+                    [mapTask setStandardError:[NSPipe pipe]];
+                    
+                    NS_DURING
+                        [mapTask launch];
+                        [mapTask waitUntilExit];
+                        NSLog(@"Window %@ unmap result: %d", windowID, [mapTask terminationStatus]);
+                    NS_HANDLER
+                        NSLog(@"Failed to unminimize window %@: %@", windowID, localException);
+                    NS_ENDHANDLER
+                    
+                    [mapTask release];
+                }
+            }
+            
+            NSLog(@"Firefox windows unhidden (%lu windows)", (unsigned long)[windowIDs count]);
+            [self notifyGWorkspaceOfStateChange];
+        } else {
+            NSLog(@"No Firefox windows found to unhide");
+        }
     NS_HANDLER
-        NSLog(@"Failed to unhide Firefox windows: %@", localException);
+        NSLog(@"Failed to search for Firefox windows: %@", localException);
     NS_ENDHANDLER
     
-    [unhideTask release];
+    [searchTask release];
+    NSLog(@"=== DEBUG: Unhide request completed ===");
 }
 
 - (BOOL)isHidden
 {
+    NSLog(@"=== DEBUG: GWorkspace asking if Firefox is hidden ===");
+    
     // Check if Firefox windows are minimized
     NSTask *checkTask = [[NSTask alloc] init];
     [checkTask setLaunchPath:@"/usr/local/bin/xdotool"];
@@ -134,12 +293,42 @@
         [checkTask launch];
         [checkTask waitUntilExit];
         hasVisibleWindows = ([checkTask terminationStatus] == 0);
+        NSLog(@"Visible windows check result: %@", hasVisibleWindows ? @"YES" : @"NO");
     NS_HANDLER
         NSLog(@"Failed to check Firefox window visibility: %@", localException);
     NS_ENDHANDLER
     
     [checkTask release];
-    return !hasVisibleWindows; // Hidden if no visible windows
+    BOOL hidden = !hasVisibleWindows;
+    NSLog(@"Firefox is hidden: %@", hidden ? @"YES" : @"NO");
+    return hidden; // Hidden if no visible windows
+}
+
+- (void)notifyGWorkspaceOfStateChange
+{
+    NSLog(@"=== DEBUG: Notifying GWorkspace of state change ===");
+    
+    // Post notifications that GWorkspace/Dock can observe
+    NSDictionary *userInfo = @{
+        @"NSApplicationName": @"Firefox",
+        @"NSApplicationPath": [[NSBundle mainBundle] bundlePath]
+    };
+    
+    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+    
+    if ([self isHidden]) {
+        NSLog(@"Posting NSApplicationDidHideNotification");
+        [nc postNotificationName:NSApplicationDidHideNotification 
+                          object:NSApp 
+                        userInfo:userInfo];
+    } else {
+        NSLog(@"Posting NSApplicationDidUnhideNotification");
+        [nc postNotificationName:NSApplicationDidUnhideNotification 
+                          object:NSApp 
+                        userInfo:userInfo];
+    }
+    
+    NSLog(@"=== DEBUG: State change notification posted ===");
 }
 
 - (void)terminate:(id)sender
@@ -158,6 +347,10 @@
             [quitTask launch];
             [quitTask waitUntilExit];
             NSLog(@"Sent quit command to Firefox");
+            
+            // Give Firefox a moment to quit gracefully, then force quit if needed
+            [self performSelector:@selector(forceQuitIfNeeded) withObject:nil afterDelay:3.0];
+            
         NS_HANDLER
             NSLog(@"Failed to send quit command: %@", localException);
             
@@ -169,6 +362,29 @@
         
         [quitTask release];
     }
+}
+
+- (void)forceQuitIfNeeded
+{
+    // Check if Firefox is still running after graceful quit attempt
+    if ([self isFirefoxCurrentlyRunning] && firefoxTask && [firefoxTask isRunning]) {
+        NSLog(@"Firefox didn't quit gracefully, force terminating");
+        [firefoxTask terminate];
+    }
+}
+
+// Additional methods for better GWorkspace integration
+- (BOOL)isRunning
+{
+    return [self isFirefoxCurrentlyRunning];
+}
+
+- (NSNumber *)processIdentifier
+{
+    if (firefoxTask && [firefoxTask isRunning]) {
+        return @([firefoxTask processIdentifier]);
+    }
+    return nil;
 }
 
 - (void)application:(NSApplication *)sender openFile:(NSString *)filename
@@ -245,7 +461,10 @@
 
 - (void)activateFirefoxWindows
 {
-    NSLog(@"Attempting to activate Firefox windows with multiple methods");
+    NSLog(@"=== DEBUG: Attempting to activate Firefox windows ===");
+    
+    // First, let's debug what windows exist
+    [self debugFirefoxWindows];
     
     // Method 1: Try wmctrl first (better for minimized windows)
     if ([self activateFirefoxWithWmctrl]) {
@@ -253,9 +472,134 @@
         return;
     }
     
-    // Method 2: Fall back to xdotool
-    NSLog(@"wmctrl failed, trying xdotool");
+    // Method 2: Try the original xdotool approach
+    NSLog(@"wmctrl failed, trying original xdotool approach");
+    if ([self activateFirefoxWithXdotoolOriginal]) {
+        NSLog(@"Firefox activated with original xdotool");
+        return;
+    }
+    
+    // Method 3: Fall back to individual window activation
+    NSLog(@"Original xdotool failed, trying individual window activation");
     [self activateFirefoxWithXdotool];
+}
+
+- (BOOL)activateFirefoxWithXdotoolOriginal
+{
+    // Try the original approach that might work for multiple windows
+    NSTask *xdotoolTask = [[NSTask alloc] init];
+    [xdotoolTask setLaunchPath:@"/usr/local/bin/xdotool"];
+    [xdotoolTask setArguments:@[@"search", @"--class", @"firefox", @"windowactivate"]];
+    
+    NSPipe *pipe = [NSPipe pipe];
+    [xdotoolTask setStandardOutput:pipe];
+    [xdotoolTask setStandardError:pipe];
+    
+    BOOL success = NO;
+    NS_DURING
+        [xdotoolTask launch];
+        [xdotoolTask waitUntilExit];
+        
+        if ([xdotoolTask terminationStatus] == 0) {
+            NSData *data = [[pipe fileHandleForReading] readDataToEndOfFile];
+            NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            NSLog(@"xdotool original output: %@", output);
+            [output release];
+            success = YES;
+        } else {
+            NSData *data = [[pipe fileHandleForReading] readDataToEndOfFile];
+            NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            NSLog(@"xdotool original failed with output: %@", output);
+            [output release];
+        }
+    NS_HANDLER
+        NSLog(@"xdotool original exception: %@", localException);
+    NS_ENDHANDLER
+    
+    [xdotoolTask release];
+    return success;
+}
+
+- (void)debugFirefoxWindows
+{
+    NSLog(@"=== Debugging Firefox Windows ===");
+    
+    // Check for visible Firefox windows
+    NSTask *visibleTask = [[NSTask alloc] init];
+    [visibleTask setLaunchPath:@"/usr/local/bin/xdotool"];
+    [visibleTask setArguments:@[@"search", @"--onlyvisible", @"--class", @"firefox"]];
+    NSPipe *visiblePipe = [NSPipe pipe];
+    [visibleTask setStandardOutput:visiblePipe];
+    [visibleTask setStandardError:[NSPipe pipe]];
+    
+    NS_DURING
+        [visibleTask launch];
+        [visibleTask waitUntilExit];
+        
+        if ([visibleTask terminationStatus] == 0) {
+            NSData *data = [[visiblePipe fileHandleForReading] readDataToEndOfFile];
+            NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            NSArray *visibleWindows = [[output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsSeparatedByString:@"\n"];
+            NSLog(@"Visible Firefox windows (%lu): %@", (unsigned long)[visibleWindows count], output);
+            [output release];
+        } else {
+            NSLog(@"No visible Firefox windows found");
+        }
+    NS_HANDLER
+        NSLog(@"Failed to check visible Firefox windows: %@", localException);
+    NS_ENDHANDLER
+    [visibleTask release];
+    
+    // Check for all Firefox windows (including minimized)
+    NSTask *allTask = [[NSTask alloc] init];
+    [allTask setLaunchPath:@"/usr/local/bin/xdotool"];
+    [allTask setArguments:@[@"search", @"--class", @"firefox"]];
+    NSPipe *allPipe = [NSPipe pipe];
+    [allTask setStandardOutput:allPipe];
+    [allTask setStandardError:[NSPipe pipe]];
+    
+    NS_DURING
+        [allTask launch];
+        [allTask waitUntilExit];
+        
+        if ([allTask terminationStatus] == 0) {
+            NSData *data = [[allPipe fileHandleForReading] readDataToEndOfFile];
+            NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            NSArray *allWindows = [[output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsSeparatedByString:@"\n"];
+            NSLog(@"All Firefox windows (%lu): %@", (unsigned long)[allWindows count], output);
+            [output release];
+        } else {
+            NSLog(@"No Firefox windows found at all");
+        }
+    NS_HANDLER
+        NSLog(@"Failed to check all Firefox windows: %@", localException);
+    NS_ENDHANDLER
+    [allTask release];
+    
+    // Also check window manager info
+    NSTask *wmctrlList = [[NSTask alloc] init];
+    [wmctrlList setLaunchPath:@"/usr/local/bin/wmctrl"];
+    [wmctrlList setArguments:@[@"-l"]];
+    NSPipe *wmPipe = [NSPipe pipe];
+    [wmctrlList setStandardOutput:wmPipe];
+    [wmctrlList setStandardError:[NSPipe pipe]];
+    
+    NS_DURING
+        [wmctrlList launch];
+        [wmctrlList waitUntilExit];
+        
+        if ([wmctrlList terminationStatus] == 0) {
+            NSData *data = [[wmPipe fileHandleForReading] readDataToEndOfFile];
+            NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            NSLog(@"wmctrl window list:\n%@", output);
+            [output release];
+        }
+    NS_HANDLER
+        NSLog(@"Failed to get wmctrl window list: %@", localException);
+    NS_ENDHANDLER
+    [wmctrlList release];
+    
+    NSLog(@"=== End Firefox Window Debug ===");
 }
 
 - (BOOL)activateFirefoxWithWmctrl
@@ -284,29 +628,54 @@
 
 - (void)activateFirefoxWithXdotool
 {
-    // Use xdotool to find and activate Firefox windows (including minimized ones)
-    NSTask *xdotoolTask = [[NSTask alloc] init];
-    [xdotoolTask setLaunchPath:@"/usr/local/bin/xdotool"];
-    [xdotoolTask setArguments:@[@"search", @"--class", @"firefox", @"windowactivate", @"%@"]];
+    // First, get all Firefox window IDs
+    NSTask *searchTask = [[NSTask alloc] init];
+    [searchTask setLaunchPath:@"/usr/local/bin/xdotool"];
+    [searchTask setArguments:@[@"search", @"--class", @"firefox"]];
     
-    // Redirect output to avoid cluttering logs
-    [xdotoolTask setStandardOutput:[NSPipe pipe]];
-    [xdotoolTask setStandardError:[NSPipe pipe]];
+    NSPipe *searchPipe = [NSPipe pipe];
+    [searchTask setStandardOutput:searchPipe];
+    [searchTask setStandardError:[NSPipe pipe]];
     
     NS_DURING
-        [xdotoolTask launch];
-        [xdotoolTask waitUntilExit];
+        [searchTask launch];
+        [searchTask waitUntilExit];
         
-        if ([xdotoolTask terminationStatus] == 0) {
-            NSLog(@"Firefox windows activated successfully with xdotool");
+        if ([searchTask terminationStatus] == 0) {
+            NSData *data = [[searchPipe fileHandleForReading] readDataToEndOfFile];
+            NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            NSArray *windowIDs = [[output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsSeparatedByString:@"\n"];
+            [output release];
+            
+            // Activate each window individually
+            for (NSString *windowID in windowIDs) {
+                if ([windowID length] > 0) {
+                    NSTask *activateTask = [[NSTask alloc] init];
+                    [activateTask setLaunchPath:@"/usr/local/bin/xdotool"];
+                    [activateTask setArguments:@[@"windowactivate", windowID]];
+                    [activateTask setStandardOutput:[NSPipe pipe]];
+                    [activateTask setStandardError:[NSPipe pipe]];
+                    
+                    NS_DURING
+                        [activateTask launch];
+                        [activateTask waitUntilExit];
+                    NS_HANDLER
+                        NSLog(@"Failed to activate window %@: %@", windowID, localException);
+                    NS_ENDHANDLER
+                    
+                    [activateTask release];
+                }
+            }
+            
+            NSLog(@"Firefox windows activated successfully with xdotool (%lu windows)", (unsigned long)[windowIDs count]);
         } else {
-            NSLog(@"xdotool activation failed or no Firefox windows found");
+            NSLog(@"xdotool search failed or no Firefox windows found");
         }
     NS_HANDLER
-        NSLog(@"Failed to run xdotool: %@", localException);
+        NSLog(@"Failed to run xdotool search: %@", localException);
     NS_ENDHANDLER
     
-    [xdotoolTask release];
+    [searchTask release];
 }
 
 - (void)waitForFirefoxToStart
@@ -346,6 +715,17 @@
     
     NSLog(@"Launching Firefox from: %@", firefoxExecutablePath);
     
+    // Notify GWorkspace that we're about to launch
+    NSDictionary *launchInfo = @{
+        @"NSApplicationName": @"Firefox",
+        @"NSApplicationPath": [[NSBundle mainBundle] bundlePath]
+    };
+    
+    [[NSNotificationCenter defaultCenter] 
+        postNotificationName:NSWorkspaceWillLaunchApplicationNotification
+                      object:[NSWorkspace sharedWorkspace]
+                    userInfo:launchInfo];
+    
     firefoxTask = [[NSTask alloc] init];
     [firefoxTask setLaunchPath:firefoxExecutablePath];
     [firefoxTask setArguments:@[]];
@@ -364,6 +744,18 @@
         [firefoxTask launch];
         isFirefoxRunning = YES;
         NSLog(@"Firefox launched successfully with PID: %d", [firefoxTask processIdentifier]);
+        
+        // Notify GWorkspace that launch completed
+        NSDictionary *didLaunchInfo = @{
+            @"NSApplicationName": @"Firefox",
+            @"NSApplicationPath": [[NSBundle mainBundle] bundlePath],
+            @"NSApplicationProcessIdentifier": @([firefoxTask processIdentifier])
+        };
+        
+        [[NSNotificationCenter defaultCenter] 
+            postNotificationName:NSWorkspaceDidLaunchApplicationNotification
+                          object:[NSWorkspace sharedWorkspace]
+                        userInfo:didLaunchInfo];
         
         // Wait for Firefox to create windows, then activate them
         [self performSelector:@selector(waitForFirefoxToStart) withObject:nil afterDelay:1.0];
@@ -422,8 +814,20 @@
     NSTask *task = [notification object];
     
     if (task == firefoxTask) {
-        NSLog(@"Firefox process terminated (PID: %d)", [task processIdentifier]);
+        NSLog(@"=== DEBUG: Firefox process terminated (PID: %d) ===", [task processIdentifier]);
         isFirefoxRunning = NO;
+        
+        // Notify GWorkspace that the application terminated
+        NSDictionary *terminationInfo = @{
+            @"NSApplicationName": @"Firefox",
+            @"NSApplicationPath": [[NSBundle mainBundle] bundlePath],
+            @"NSApplicationProcessIdentifier": @([task processIdentifier])
+        };
+        
+        [[NSNotificationCenter defaultCenter] 
+            postNotificationName:NSWorkspaceDidTerminateApplicationNotification
+                          object:[NSWorkspace sharedWorkspace]
+                        userInfo:terminationInfo];
         
         [[NSNotificationCenter defaultCenter] removeObserver:self 
                                                         name:NSTaskDidTerminateNotification 
@@ -431,8 +835,8 @@
         [firefoxTask release];
         firefoxTask = nil;
         
-        NSLog(@"Firefox has quit, terminating Firefox launcher");
-        [NSApp terminate:self];
+        NSLog(@"=== DEBUG: Firefox has quit, but wrapper staying running ===");
+        // DO NOT terminate the wrapper - keep it running for future launches
     }
 }
 
@@ -452,18 +856,39 @@
     return NO;
 }
 
+- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender
+{
+    // Never terminate just because windows close - we're a background service
+    NSLog(@"=== DEBUG: Refusing to terminate after last window closed ===");
+    return NO;
+}
+
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender
+{
+    NSLog(@"=== DEBUG: Application termination requested ===");
+    
+    // For now, let's just refuse to terminate to see what's trying to quit us
+    NSLog(@"Refusing termination to keep wrapper running");
+    return NSTerminateCancel;
+}
+
 - (void)applicationWillTerminate:(NSNotification *)notification
 {
     NSLog(@"Firefox launcher will terminate");
     
     if (serviceConnection) {
         [serviceConnection invalidate];
+        serviceConnection = nil;
     }
-}
-
-- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender
-{
-    return NSTerminateNow;
+    
+    // Clean up Firefox task if still running
+    if (firefoxTask) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self 
+                                                        name:NSTaskDidTerminateNotification 
+                                                      object:firefoxTask];
+        [firefoxTask release];
+        firefoxTask = nil;
+    }
 }
 
 - (void)dealloc

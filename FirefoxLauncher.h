@@ -15,6 +15,7 @@
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)theApplication hasVisibleWindows:(BOOL)flag;
 - (void)applicationWillTerminate:(NSNotification *)notification;
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender;
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender;
 
 // Firefox management
 - (void)launchFirefox;
@@ -36,5 +37,8 @@
 - (BOOL)activateFirefoxWithWmctrl;
 - (void)activateFirefoxWithXdotool;
 - (void)waitForFirefoxToStart;
+- (void)forceQuitIfNeeded;
+- (BOOL)isRunning;
+- (NSNumber *)processIdentifier;
 
 @end
