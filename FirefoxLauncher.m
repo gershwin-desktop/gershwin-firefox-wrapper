@@ -472,29 +472,78 @@
 {
     NSLog(@"Activating Firefox windows");
     
-    // Try wmctrl first - most reliable
+    // Try wmctrl first - most reliable and handles all windows
     if ([self activateFirefoxWithWmctrl]) {
         NSLog(@"Firefox activated with wmctrl");
         return;
     }
     
-    // Fallback to simple xdotool
-    NSLog(@"wmctrl failed, trying xdotool");
-    NSTask *xdotoolTask = [[NSTask alloc] init];
-    [xdotoolTask setLaunchPath:@"/usr/local/bin/xdotool"];
-    [xdotoolTask setArguments:@[@"search", @"--class", @"firefox", @"windowactivate"]];
-    [xdotoolTask setStandardOutput:[NSPipe pipe]];
-    [xdotoolTask setStandardError:[NSPipe pipe]];
+    // Fallback to xdotool - activate ALL Firefox windows
+    NSLog(@"wmctrl failed, trying xdotool for all windows");
+    [self activateAllFirefoxWindowsWithXdotool];
+}
+
+- (void)activateAllFirefoxWindowsWithXdotool
+{
+    // First, get all Firefox window IDs
+    NSTask *searchTask = [[NSTask alloc] init];
+    [searchTask setLaunchPath:@"/usr/local/bin/xdotool"];
+    [searchTask setArguments:@[@"search", @"--class", @"firefox"]];
+    
+    NSPipe *searchPipe = [NSPipe pipe];
+    [searchTask setStandardOutput:searchPipe];
+    [searchTask setStandardError:[NSPipe pipe]];
     
     NS_DURING
-        [xdotoolTask launch];
-        [xdotoolTask waitUntilExit];
-        NSLog(@"xdotool activation complete");
+        [searchTask launch];
+        [searchTask waitUntilExit];
+        
+        if ([searchTask terminationStatus] == 0) {
+            NSData *data = [[searchPipe fileHandleForReading] readDataToEndOfFile];
+            NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            NSArray *windowIDs = [[output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsSeparatedByString:@"\n"];
+            [output release];
+            
+            NSLog(@"Found %lu Firefox windows to activate", (unsigned long)[windowIDs count]);
+            
+            // Activate each window individually
+            for (NSString *windowID in windowIDs) {
+                if ([windowID length] > 0 && ![windowID isEqualToString:@""]) {
+                    [self activateWindowWithID:windowID];
+                }
+            }
+            
+            NSLog(@"All Firefox windows activated");
+        } else {
+            NSLog(@"No Firefox windows found to activate");
+        }
     NS_HANDLER
-        NSLog(@"xdotool failed: %@", localException);
+        NSLog(@"xdotool search failed: %@", localException);
     NS_ENDHANDLER
     
-    [xdotoolTask release];
+    [searchTask release];
+}
+
+- (void)activateWindowWithID:(NSString *)windowID
+{
+    NSTask *activateTask = [[NSTask alloc] init];
+    [activateTask setLaunchPath:@"/usr/local/bin/xdotool"];
+    [activateTask setArguments:@[@"windowactivate", windowID]];
+    [activateTask setStandardOutput:[NSPipe pipe]];
+    [activateTask setStandardError:[NSPipe pipe]];
+    
+    NS_DURING
+        [activateTask launch];
+        [activateTask waitUntilExit];
+        
+        if ([activateTask terminationStatus] == 0) {
+            NSLog(@"Activated window %@", windowID);
+        }
+    NS_HANDLER
+        NSLog(@"Failed to activate window %@: %@", windowID, localException);
+    NS_ENDHANDLER
+    
+    [activateTask release];
 }
 
 - (BOOL)activateFirefoxWithXdotoolOriginal

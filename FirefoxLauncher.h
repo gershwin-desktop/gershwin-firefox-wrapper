@@ -36,9 +36,16 @@
 - (void)openFileInFirefox:(NSString *)filename activate:(BOOL)shouldActivate;
 - (BOOL)activateFirefoxWithWmctrl;
 - (void)activateFirefoxWithXdotool;
+- (void)activateAllFirefoxWindowsWithXdotool;  // Add this line
+- (void)activateWindowWithID:(NSString *)windowID;  // Add this line
+- (BOOL)activateFirefoxWithXdotoolOriginal;
 - (void)waitForFirefoxToStart;
+- (void)notifyGWorkspaceOfStateChange;
+- (void)debugFirefoxWindows;
 - (void)forceQuitIfNeeded;
 - (void)forceQuitFirefoxAndExit;
+- (void)startPeriodicFirefoxMonitoring;
+- (void)periodicFirefoxCheck:(NSTimer *)timer;
 - (BOOL)isRunning;
 - (NSNumber *)processIdentifier;
 
