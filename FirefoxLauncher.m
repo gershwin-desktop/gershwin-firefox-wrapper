@@ -6,12 +6,7 @@
 {
     self = [super init];
     if (self) {
-        // Point to the real Firefox we moved
-        firefoxExecutablePath = @"/Applications/Firefox-real.app/Contents/MacOS/firefox";
-        // Fallback to system Firefox if real one not found
-        if (![[NSFileManager defaultManager] fileExistsAtPath:firefoxExecutablePath]) {
-            firefoxExecutablePath = @"/usr/local/bin/firefox";
-        }
+        firefoxExecutablePath = @"/usr/local/bin/firefox";
         isFirefoxRunning = NO;
         firefoxTask = nil;
         serviceConnection = nil;
