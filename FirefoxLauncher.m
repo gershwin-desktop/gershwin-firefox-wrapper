@@ -26,23 +26,6 @@
     // Force the process name to be Firefox
     [[NSProcessInfo processInfo] setProcessName:@"Firefox"];
     
-    // Debug bundle information
-    NSBundle *bundle = [NSBundle mainBundle];
-    NSLog(@"Bundle path: %@", [bundle bundlePath]);
-    NSLog(@"Bundle identifier: %@", [bundle bundleIdentifier]);
-    NSLog(@"Bundle name: %@", [bundle objectForInfoDictionaryKey:@"CFBundleName"]);
-    NSLog(@"Bundle display name: %@", [bundle objectForInfoDictionaryKey:@"CFBundleDisplayName"]);
-    NSLog(@"Bundle executable: %@", [bundle objectForInfoDictionaryKey:@"CFBundleExecutable"]);
-    NSLog(@"Executable path: %@", [bundle executablePath]);
-    NSLog(@"Process name: %@", [[NSProcessInfo processInfo] processName]);
-    
-    // Check what GWorkspace might find when looking for "Firefox"
-    NSWorkspace *ws = [NSWorkspace sharedWorkspace];
-    NSString *firefoxPath = [ws fullPathForApplication:@"Firefox"];
-    NSLog(@"GWorkspace thinks Firefox is at: %@", firefoxPath);
-    NSLog(@"Our actual path: %@", [bundle bundlePath]);
-    NSLog(@"Paths match: %@", [firefoxPath isEqualToString:[bundle bundlePath]] ? @"YES" : @"NO");
-    
     NSString *iconPath = [[NSBundle mainBundle] pathForResource:@"Firefox" ofType:@"png"];
     if (iconPath && [[NSFileManager defaultManager] fileExistsAtPath:iconPath]) {
         NSImage *icon = [[NSImage alloc] initWithContentsOfFile:iconPath];
@@ -61,80 +44,28 @@
     NSLog(@"Attempting to register distributed object as '%@'", appName);
     
     if (![serviceConnection registerName:appName]) {
-        NSLog(@"Registration failed - checking for existing instance");
-        NSConnection *existing = [NSConnection connectionWithRegisteredName:appName host:nil];
-        if (existing) {
-            NSLog(@"Firefox launcher already running, activating existing instance");
-            
-            // Try to contact the existing wrapper to activate Firefox
-            id proxy = [existing rootProxy];
-            NSLog(@"Got proxy: %@", proxy);
-            if (proxy && [proxy respondsToSelector:@selector(activateIgnoringOtherApps:)]) {
-                NSLog(@"Calling activateIgnoringOtherApps on existing instance");
-                [proxy activateIgnoringOtherApps:YES];
-            } else {
-                NSLog(@"Proxy doesn't respond to activateIgnoringOtherApps, trying direct activation");
-                // Fallback to direct activation
-                [self activateFirefoxWindows];
-            }
-            
-            // Exit gracefully instead of hard exit
-            [NSApp terminate:self];
-            return; // Don't continue with initialization
-        } else {
-            NSLog(@"No existing connection found, but registration still failed");
-            // Don't exit here - maybe we can still work without distributed objects
-            NSLog(@"Continuing without distributed objects registration");
-        }
-    } else {
-        NSLog(@"Firefox launcher successfully registered as '%@'", appName);
-        NSLog(@"Service connection: %@", serviceConnection);
-        NSLog(@"Root object: %@", [serviceConnection rootObject]);
+        NSLog(@"Registration failed - another Firefox wrapper may be running");
+        // Don't try to contact existing instance - just exit cleanly
+        [NSApp terminate:self];
+        return;
     }
+    
+    NSLog(@"Firefox launcher successfully registered as '%@'", appName);
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification
 {
     NSLog(@"=== DEBUG: Application finished launching ===");
     
-    // Test if GWorkspace can find us
-    NSWorkspace *ws = [NSWorkspace sharedWorkspace];
-    NSString *ourPath = [[NSBundle mainBundle] bundlePath];
-    NSArray *runningApps = [ws runningApplications];
-    
-    NSLog(@"Currently running applications:");
-    for (NSDictionary *app in runningApps) {
-        NSString *name = [app objectForKey:@"NSApplicationName"];
-        NSString *path = [app objectForKey:@"NSApplicationPath"];
-        NSLog(@"  %@ at %@", name, path);
-        
-        if ([name isEqualToString:@"Firefox"]) {
-            NSLog(@"  *** Found Firefox in running apps! Path: %@", path);
-            NSLog(@"  *** Matches our path: %@", [path isEqualToString:ourPath] ? @"YES" : @"NO");
-        }
-    }
-    
-    // Test distributed objects registration
-    NSConnection *testConnection = [NSConnection connectionWithRegisteredName:@"Firefox" host:nil];
-    if (testConnection) {
-        id proxy = [testConnection rootProxy];
-        NSLog(@"Distributed object 'Firefox' found: %@", proxy);
-        NSLog(@"Proxy class: %@", [proxy class]);
-        NSLog(@"Responds to activateIgnoringOtherApps: %@", 
-              [proxy respondsToSelector:@selector(activateIgnoringOtherApps:)] ? @"YES" : @"NO");
-    } else {
-        NSLog(@"No distributed object named 'Firefox' found");
-    }
-    
     if ([self isFirefoxCurrentlyRunning]) {
-        NSLog(@"Firefox is already running");
+        NSLog(@"Firefox is already running, activating windows");
         [self activateFirefoxWindows];
     } else {
         NSLog(@"Firefox not running, launching it");
         [self launchFirefox];
     }
     
-    // Start periodic monitoring of Firefox processes
+    // Start simple periodic monitoring
     [self startPeriodicFirefoxMonitoring];
     
     NSLog(@"=== DEBUG: Application setup complete ===");
@@ -142,10 +73,10 @@
 
 - (void)startPeriodicFirefoxMonitoring
 {
-    NSLog(@"=== DEBUG: Starting periodic Firefox monitoring ===");
+    NSLog(@"Starting Firefox monitoring (5 second intervals)");
     
-    // Check every 2 seconds if Firefox is still running
-    [NSTimer scheduledTimerWithTimeInterval:2.0
+    // Check every 5 seconds - less frequent to avoid blocking
+    [NSTimer scheduledTimerWithTimeInterval:5.0
                                      target:self
                                    selector:@selector(periodicFirefoxCheck:)
                                    userInfo:nil
@@ -154,19 +85,35 @@
 
 - (void)periodicFirefoxCheck:(NSTimer *)timer
 {
-    BOOL firefoxStillRunning = [self isFirefoxCurrentlyRunning];
+    // Quick, non-blocking check
+    NSTask *task = [[NSTask alloc] init];
+    [task setLaunchPath:@"/usr/bin/pgrep"];
+    [task setArguments:@[@"-f", @"firefox"]];
+    [task setStandardOutput:[NSPipe pipe]];
+    [task setStandardError:[NSPipe pipe]];
     
-    static BOOL lastFirefoxState = YES; // Assume it was running when we started
+    BOOL firefoxRunning = NO;
     
-    if (lastFirefoxState && !firefoxStillRunning) {
-        NSLog(@"=== DEBUG: Firefox processes have stopped, terminating wrapper ===");
-        [timer invalidate]; // Stop the timer
+    NS_DURING
+        [task launch];
+        [task waitUntilExit];
+        firefoxRunning = ([task terminationStatus] == 0);
+    NS_HANDLER
+        NSLog(@"Firefox check failed: %@", localException);
+        firefoxRunning = NO;
+    NS_ENDHANDLER
+    
+    [task release];
+    
+    static BOOL wasRunning = YES; // Assume Firefox was running when we started
+    
+    if (wasRunning && !firefoxRunning) {
+        NSLog(@"Firefox stopped - terminating wrapper");
+        [timer invalidate];
         [NSApp terminate:self];
-    } else if (!lastFirefoxState && firefoxStillRunning) {
-        NSLog(@"=== DEBUG: Firefox processes detected again ===");
     }
     
-    lastFirefoxState = firefoxStillRunning;
+    wasRunning = firefoxRunning;
 }
 
 #pragma mark - GWorkspace Integration Methods
@@ -523,27 +470,31 @@
 
 - (void)activateFirefoxWindows
 {
-    NSLog(@"=== DEBUG: Attempting to activate Firefox windows ===");
+    NSLog(@"Activating Firefox windows");
     
-    // First, let's debug what windows exist
-    [self debugFirefoxWindows];
-    
-    // Method 1: Try wmctrl first (better for minimized windows)
+    // Try wmctrl first - most reliable
     if ([self activateFirefoxWithWmctrl]) {
-        NSLog(@"Firefox activated successfully with wmctrl");
+        NSLog(@"Firefox activated with wmctrl");
         return;
     }
     
-    // Method 2: Try the original xdotool approach
-    NSLog(@"wmctrl failed, trying original xdotool approach");
-    if ([self activateFirefoxWithXdotoolOriginal]) {
-        NSLog(@"Firefox activated with original xdotool");
-        return;
-    }
+    // Fallback to simple xdotool
+    NSLog(@"wmctrl failed, trying xdotool");
+    NSTask *xdotoolTask = [[NSTask alloc] init];
+    [xdotoolTask setLaunchPath:@"/usr/local/bin/xdotool"];
+    [xdotoolTask setArguments:@[@"search", @"--class", @"firefox", @"windowactivate"]];
+    [xdotoolTask setStandardOutput:[NSPipe pipe]];
+    [xdotoolTask setStandardError:[NSPipe pipe]];
     
-    // Method 3: Fall back to individual window activation
-    NSLog(@"Original xdotool failed, trying individual window activation");
-    [self activateFirefoxWithXdotool];
+    NS_DURING
+        [xdotoolTask launch];
+        [xdotoolTask waitUntilExit];
+        NSLog(@"xdotool activation complete");
+    NS_HANDLER
+        NSLog(@"xdotool failed: %@", localException);
+    NS_ENDHANDLER
+    
+    [xdotoolTask release];
 }
 
 - (BOOL)activateFirefoxWithXdotoolOriginal
@@ -841,41 +792,19 @@
 
 - (BOOL)isFirefoxCurrentlyRunning
 {
-    // First check our managed task
-    if (firefoxTask && [firefoxTask isRunning]) {
-        return YES;
-    }
-    
-    // Also check for any Firefox processes we didn't launch or that might have respawned
+    // Simple, fast check
     NSTask *task = [[NSTask alloc] init];
     [task setLaunchPath:@"/usr/bin/pgrep"];
     [task setArguments:@[@"-f", @"firefox"]];
-    
-    NSPipe *pipe = [NSPipe pipe];
-    [task setStandardOutput:pipe];
+    [task setStandardOutput:[NSPipe pipe]];
     [task setStandardError:[NSPipe pipe]];
     
     BOOL running = NO;
     NS_DURING
         [task launch];
         [task waitUntilExit];
-        
-        if ([task terminationStatus] == 0) {
-            // Get the process list to see what we found
-            NSData *data = [[pipe fileHandleForReading] readDataToEndOfFile];
-            NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-            NSString *trimmedOutput = [output stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            
-            if ([trimmedOutput length] > 0) {
-                NSLog(@"Firefox processes found: %@", trimmedOutput);
-                running = YES;
-            }
-            [output release];
-        } else {
-            NSLog(@"No Firefox processes found via pgrep");
-        }
+        running = ([task terminationStatus] == 0);
     NS_HANDLER
-        NSLog(@"pgrep command failed: %@", localException);
         running = NO;
     NS_ENDHANDLER
     
