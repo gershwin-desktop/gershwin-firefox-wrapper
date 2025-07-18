@@ -666,25 +666,181 @@
 
 - (BOOL)activateFirefoxWithWmctrl
 {
-    NSTask *wmctrlTask = [[NSTask alloc] init];
-    [wmctrlTask setLaunchPath:@"/usr/local/bin/wmctrl"];
-    [wmctrlTask setArguments:@[@"-a", @"firefox"]];
-    [wmctrlTask setStandardOutput:[NSPipe pipe]];
-    [wmctrlTask setStandardError:[NSPipe pipe]];
+    NSLog(@"Attempting to activate all Firefox windows with wmctrl");
+    
+    // First, get list of all windows
+    NSTask *listTask = [[NSTask alloc] init];
+    [listTask setLaunchPath:@"/usr/local/bin/wmctrl"];
+    [listTask setArguments:@[@"-l"]];
+    
+    NSPipe *listPipe = [NSPipe pipe];
+    [listTask setStandardOutput:listPipe];
+    [listTask setStandardError:[NSPipe pipe]];
     
     BOOL success = NO;
+    
     NS_DURING
-        [wmctrlTask launch];
-        [wmctrlTask waitUntilExit];
+        [listTask launch];
+        [listTask waitUntilExit];
         
-        if ([wmctrlTask terminationStatus] == 0) {
-            success = YES;
+        if ([listTask terminationStatus] == 0) {
+            NSData *data = [[listPipe fileHandleForReading] readDataToEndOfFile];
+            NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            
+            // Parse the output to find Firefox windows
+            NSArray *lines = [output componentsSeparatedByString:@"\n"];
+            NSMutableArray *firefoxWindowIDs = [[NSMutableArray alloc] init];
+            
+            for (NSString *line in lines) {
+                if ([line length] > 0) {
+                    // wmctrl -l output format: "0x03c00009  0 hostname window_title"
+                    // We need to check if the window title contains "Firefox" (case-insensitive)
+                    NSRange firefoxRange = [line rangeOfString:@"Firefox" options:NSCaseInsensitiveSearch];
+                    NSRange mozillaRange = [line rangeOfString:@"Mozilla" options:NSCaseInsensitiveSearch];
+                    
+                    if (firefoxRange.location != NSNotFound || mozillaRange.location != NSNotFound) {
+                        // Extract window ID (first part of the line)
+                        NSArray *components = [line componentsSeparatedByString:@" "];
+                        if ([components count] > 0) {
+                            NSString *windowID = [components objectAtIndex:0];
+                            [firefoxWindowIDs addObject:windowID];
+                            NSLog(@"Found Firefox window ID: %@", windowID);
+                        }
+                    }
+                }
+            }
+            
+            [output release];
+            
+            // Activate each Firefox window individually
+            if ([firefoxWindowIDs count] > 0) {
+                NSLog(@"Activating %lu Firefox windows with wmctrl", (unsigned long)[firefoxWindowIDs count]);
+                
+                for (NSString *windowID in firefoxWindowIDs) {
+                    NSTask *activateTask = [[NSTask alloc] init];
+                    [activateTask setLaunchPath:@"/usr/local/bin/wmctrl"];
+                    [activateTask setArguments:@[@"-i", @"-a", windowID]];
+                    [activateTask setStandardOutput:[NSPipe pipe]];
+                    [activateTask setStandardError:[NSPipe pipe]];
+                    
+                    NS_DURING
+                        [activateTask launch];
+                        [activateTask waitUntilExit];
+                        
+                        if ([activateTask terminationStatus] == 0) {
+                            NSLog(@"Successfully activated window %@", windowID);
+                            success = YES;
+                        } else {
+                            NSLog(@"Failed to activate window %@", windowID);
+                        }
+                    NS_HANDLER
+                        NSLog(@"Exception activating window %@: %@", windowID, localException);
+                    NS_ENDHANDLER
+                    
+                    [activateTask release];
+                }
+            } else {
+                NSLog(@"No Firefox windows found in wmctrl output");
+            }
+            
+            [firefoxWindowIDs release];
+        } else {
+            NSLog(@"wmctrl -l failed with status: %d", [listTask terminationStatus]);
         }
     NS_HANDLER
-        NSLog(@"wmctrl failed: %@", localException);
+        NSLog(@"wmctrl list command failed: %@", localException);
     NS_ENDHANDLER
     
-    [wmctrlTask release];
+    [listTask release];
+    return success;
+}
+
+// Alternative approach: Use wmctrl to get window IDs by class name
+- (BOOL)activateFirefoxWithWmctrlByClass
+{
+    NSLog(@"Attempting to activate Firefox windows by class with wmctrl");
+    
+    // Get Firefox windows by class name
+    NSTask *listTask = [[NSTask alloc] init];
+    [listTask setLaunchPath:@"/usr/local/bin/wmctrl"];
+    [listTask setArguments:@[@"-l", @"-x"]]; // -x shows class names
+    
+    NSPipe *listPipe = [NSPipe pipe];
+    [listTask setStandardOutput:listPipe];
+    [listTask setStandardError:[NSPipe pipe]];
+    
+    BOOL success = NO;
+    
+    NS_DURING
+        [listTask launch];
+        [listTask waitUntilExit];
+        
+        if ([listTask terminationStatus] == 0) {
+            NSData *data = [[listPipe fileHandleForReading] readDataToEndOfFile];
+            NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            
+            // Parse the output to find Firefox windows by class
+            NSArray *lines = [output componentsSeparatedByString:@"\n"];
+            NSMutableArray *firefoxWindowIDs = [[NSMutableArray alloc] init];
+            
+            for (NSString *line in lines) {
+                if ([line length] > 0) {
+                    // wmctrl -l -x output format: "0x03c00009  0 firefox.Firefox hostname window_title"
+                    // Look for firefox class name
+                    NSRange firefoxClassRange = [line rangeOfString:@"firefox" options:NSCaseInsensitiveSearch];
+                    
+                    if (firefoxClassRange.location != NSNotFound) {
+                        // Extract window ID (first part of the line)
+                        NSArray *components = [line componentsSeparatedByString:@" "];
+                        if ([components count] > 0) {
+                            NSString *windowID = [components objectAtIndex:0];
+                            [firefoxWindowIDs addObject:windowID];
+                            NSLog(@"Found Firefox window ID by class: %@", windowID);
+                        }
+                    }
+                }
+            }
+            
+            [output release];
+            
+            // Activate each Firefox window
+            if ([firefoxWindowIDs count] > 0) {
+                NSLog(@"Activating %lu Firefox windows by class with wmctrl", (unsigned long)[firefoxWindowIDs count]);
+                
+                for (NSString *windowID in firefoxWindowIDs) {
+                    NSTask *activateTask = [[NSTask alloc] init];
+                    [activateTask setLaunchPath:@"/usr/local/bin/wmctrl"];
+                    [activateTask setArguments:@[@"-i", @"-a", windowID]];
+                    [activateTask setStandardOutput:[NSPipe pipe]];
+                    [activateTask setStandardError:[NSPipe pipe]];
+                    
+                    NS_DURING
+                        [activateTask launch];
+                        [activateTask waitUntilExit];
+                        
+                        if ([activateTask terminationStatus] == 0) {
+                            NSLog(@"Successfully activated window %@ by class", windowID);
+                            success = YES;
+                        }
+                    NS_HANDLER
+                        NSLog(@"Exception activating window %@ by class: %@", windowID, localException);
+                    NS_ENDHANDLER
+                    
+                    [activateTask release];
+                }
+            } else {
+                NSLog(@"No Firefox windows found by class in wmctrl output");
+            }
+            
+            [firefoxWindowIDs release];
+        } else {
+            NSLog(@"wmctrl -l -x failed with status: %d", [listTask terminationStatus]);
+        }
+    NS_HANDLER
+        NSLog(@"wmctrl list by class command failed: %@", localException);
+    NS_ENDHANDLER
+    
+    [listTask release];
     return success;
 }
 
