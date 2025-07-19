@@ -14,6 +14,9 @@
     BOOL wasFirefoxRunning;
     BOOL isFirstMonitoringRun;
     int stableStateCount;
+    
+    // Flag to track if termination is pending
+    BOOL terminationPending;
 }
 
 - (void)applicationWillFinishLaunching:(NSNotification *)notification;
@@ -55,5 +58,6 @@
 - (void)postFirefoxLaunchNotification;
 - (void)postFirefoxTerminationNotification;
 - (void)handleInitialFirefoxState;
+- (void)delayedTerminate;
 
 @end

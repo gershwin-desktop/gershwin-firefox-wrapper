@@ -21,6 +21,9 @@
         wasFirefoxRunning = NO;
         isFirstMonitoringRun = YES;
         stableStateCount = 0;
+        
+        // Initialize termination flag
+        terminationPending = NO;
     }
     return self;
 }
@@ -172,7 +175,8 @@
             if (shouldTerminateWhenFirefoxQuits) {
                 [timer invalidate];
                 monitoringTimer = nil;
-                [NSApp terminate:self];
+                // Add a delay to ensure GWorkspace notification is processed before we exit
+                [self performSelector:@selector(delayedTerminate) withObject:nil afterDelay:0.5];
                 return;
             }
         } else if (!wasFirefoxRunning && firefoxRunning) {
@@ -194,6 +198,11 @@
             stableStateCount = 0;
         }
     }
+}
+
+- (void)delayedTerminate
+{
+    [NSApp terminate:self];
 }
 
 - (BOOL)waitForFirefoxToQuit:(NSTimeInterval)timeout
@@ -836,6 +845,17 @@
 
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)theApplication hasVisibleWindows:(BOOL)flag
 {
+    // If termination is pending, cancel it since user wants to reactivate
+    if (terminationPending) {
+        [NSObject cancelPreviousPerformRequestsWithTarget:self 
+                                                 selector:@selector(delayedTerminate) 
+                                                   object:nil];
+        terminationPending = NO;
+        
+        // Since we never posted a termination notification (we were just pending),
+        // we don't need to post a launch notification here
+    }
+    
     if ([self isFirefoxCurrentlyRunning]) {
         [self activateFirefoxWindows];
     } else {
