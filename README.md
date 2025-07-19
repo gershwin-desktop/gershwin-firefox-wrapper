@@ -44,3 +44,5 @@ Uses NSConnection distributed objects instead of fragile PID files:
 
 ### Operating System
 - **GhostBSD** (Gesrhwin community edition)
+- **libdispatch**
+- **wmctrl-fork**
