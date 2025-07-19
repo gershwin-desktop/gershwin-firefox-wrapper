@@ -8,7 +8,6 @@ Firefox_OBJC_FILES = \
 
 include $(GNUSTEP_MAKEFILES)/application.make
 
-# Create the Info.plist file
 after-all::
 	@echo "Creating Info-gnustep.plist..."
 	@echo '{' > Firefox.app/Resources/Info-gnustep.plist
