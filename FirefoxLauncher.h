@@ -36,8 +36,8 @@
 - (void)unhideWithoutActivation;
 - (BOOL)isHidden;
 - (void)terminate:(id)sender;
-- (void)application:(NSApplication *)sender openFile:(NSString *)filename;
-- (void)application:(NSApplication *)sender openFileWithoutUI:(NSString *)filename;
+- (BOOL)application:(NSApplication *)sender openFile:(NSString *)filename;
+- (BOOL)application:(NSApplication *)sender openFileWithoutUI:(NSString *)filename;
 
 - (void)openFileInFirefox:(NSString *)filename activate:(BOOL)shouldActivate;
 - (BOOL)activateFirefoxWithWmctrl;
@@ -46,5 +46,9 @@
 - (BOOL)isRunning;
 - (NSNumber *)processIdentifier;
 - (NSString *)getExecutablePathForPID:(pid_t)pid;
+
+- (void)postFirefoxLaunchNotification;
+- (void)postFirefoxTerminationNotification;
+- (void)handleInitialFirefoxState;
 
 @end

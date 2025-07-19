@@ -89,6 +89,32 @@
     return nil;
 }
 
+- (void)postFirefoxLaunchNotification
+{
+    NSDictionary *launchInfo = @{
+        @"NSApplicationName": @"Firefox",
+        @"NSApplicationPath": [[NSBundle mainBundle] bundlePath]
+    };
+    
+    [[NSNotificationCenter defaultCenter] 
+        postNotificationName:NSWorkspaceDidLaunchApplicationNotification
+                      object:[NSWorkspace sharedWorkspace]
+                    userInfo:launchInfo];
+}
+
+- (void)postFirefoxTerminationNotification
+{
+    NSDictionary *terminationInfo = @{
+        @"NSApplicationName": @"Firefox",
+        @"NSApplicationPath": [[NSBundle mainBundle] bundlePath]
+    };
+    
+    [[NSNotificationCenter defaultCenter] 
+        postNotificationName:NSWorkspaceDidTerminateApplicationNotification
+                      object:[NSWorkspace sharedWorkspace]
+                    userInfo:terminationInfo];
+}
+
 - (void)startSmartFirefoxMonitoring
 {
     [self stopFirefoxMonitoring];
@@ -129,6 +155,10 @@
     if (firstRun) {
         wasRunning = firefoxRunning;
         firstRun = NO;
+        
+        if (firefoxRunning) {
+            [self postFirefoxLaunchNotification];
+        }
         return;
     }
     
@@ -136,15 +166,7 @@
         stableStateCount = 0;
         
         if (wasRunning && !firefoxRunning) {
-            NSDictionary *terminationInfo = @{
-                @"NSApplicationName": @"Firefox",
-                @"NSApplicationPath": [[NSBundle mainBundle] bundlePath]
-            };
-            
-            [[NSNotificationCenter defaultCenter] 
-                postNotificationName:NSWorkspaceDidTerminateApplicationNotification
-                              object:[NSWorkspace sharedWorkspace]
-                            userInfo:terminationInfo];
+            [self postFirefoxTerminationNotification];
             
             if (shouldTerminateWhenFirefoxQuits) {
                 [timer invalidate];
@@ -153,25 +175,12 @@
                 return;
             }
         } else if (!wasRunning && firefoxRunning) {
-            NSDictionary *launchInfo = @{
-                @"NSApplicationName": @"Firefox",
-                @"NSApplicationPath": [[NSBundle mainBundle] bundlePath]
-            };
-            
-            [[NSNotificationCenter defaultCenter] 
-                postNotificationName:NSWorkspaceDidLaunchApplicationNotification
-                              object:[NSWorkspace sharedWorkspace]
-                            userInfo:launchInfo];
+            [self postFirefoxLaunchNotification];
         }
         
         wasRunning = firefoxRunning;
         
-        [timer invalidate];
-        monitoringTimer = [NSTimer scheduledTimerWithTimeInterval:0.5
-                                                           target:self
-                                                         selector:@selector(smartFirefoxCheck:)
-                                                         userInfo:nil
-                                                          repeats:YES];
+        stableStateCount = 0;
     } else {
         stableStateCount++;
         
@@ -242,13 +251,18 @@
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification
 {
+    [self startSmartFirefoxMonitoring];
+    
+    [self performSelector:@selector(handleInitialFirefoxState) withObject:nil afterDelay:0.1];
+}
+
+- (void)handleInitialFirefoxState
+{
     if ([self isFirefoxCurrentlyRunning]) {
         [self activateFirefoxWindows];
     } else {
         [self launchFirefox];
     }
-    
-    [self startSmartFirefoxMonitoring];
 }
 
 #pragma mark - GWorkspace Integration Methods
@@ -515,14 +529,16 @@
     return nil;
 }
 
-- (void)application:(NSApplication *)sender openFile:(NSString *)filename
+- (BOOL)application:(NSApplication *)sender openFile:(NSString *)filename
 {
     [self openFileInFirefox:filename activate:YES];
+    return YES;
 }
 
-- (void)application:(NSApplication *)sender openFileWithoutUI:(NSString *)filename
+- (BOOL)application:(NSApplication *)sender openFileWithoutUI:(NSString *)filename
 {
     [self openFileInFirefox:filename activate:NO];
+    return YES;
 }
 
 - (void)openFileInFirefox:(NSString *)filename activate:(BOOL)shouldActivate
