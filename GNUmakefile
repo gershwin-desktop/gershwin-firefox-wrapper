@@ -18,6 +18,7 @@ after-all::
 	@echo '    CFBundleIconFile = "Firefox.png";' >> Firefox.app/Resources/Info-gnustep.plist
 	@echo '    NSPrincipalClass = "NSApplication";' >> Firefox.app/Resources/Info-gnustep.plist
 	@echo '    LSUIElement = "NO";' >> Firefox.app/Resources/Info-gnustep.plist
+	@echo '    NSUseRunningCopy = "NO";' >> Firefox.app/Resources/Info-gnustep.plist
 	@echo '}' >> Firefox.app/Resources/Info-gnustep.plist
 	@echo "Info-gnustep.plist created successfully"
 	@if [ -f Firefox.png ]; then \

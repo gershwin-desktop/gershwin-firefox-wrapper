@@ -59,5 +59,6 @@
 - (void)postFirefoxTerminationNotification;
 - (void)handleInitialFirefoxState;
 - (void)delayedTerminate;
+- (void)delayedTerminateAfterNotifications;
 
 @end

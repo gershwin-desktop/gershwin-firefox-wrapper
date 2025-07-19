@@ -132,7 +132,8 @@
     isFirstMonitoringRun = YES;
     stableStateCount = 0;
     
-    NSTimeInterval interval = 0.5;
+    // Start with faster polling for quicker detection of state changes
+    NSTimeInterval interval = 0.2;  // Reduced from 0.5 for faster response
     
     monitoringTimer = [NSTimer scheduledTimerWithTimeInterval:interval
                                                        target:self
@@ -170,17 +171,23 @@
         stableStateCount = 0;
         
         if (wasFirefoxRunning && !firefoxRunning) {
+            // Firefox just quit - post termination notification immediately
             [self postFirefoxTerminationNotification];
             
+            // Also notify GWorkspace of the state change
+            [self notifyGWorkspaceOfStateChange];
+            
             if (shouldTerminateWhenFirefoxQuits) {
-                [timer invalidate];
-                monitoringTimer = nil;
-                // Add a delay to ensure GWorkspace notification is processed before we exit
-                [self performSelector:@selector(delayedTerminate) withObject:nil afterDelay:0.5];
+                // Keep monitoring for a brief period to ensure all notifications are processed
+                // before terminating, but don't invalidate the timer yet
+                [self performSelector:@selector(delayedTerminateAfterNotifications) 
+                           withObject:nil 
+                           afterDelay:0.1];  // Reduced delay for quicker response
                 return;
             }
         } else if (!wasFirefoxRunning && firefoxRunning) {
             [self postFirefoxLaunchNotification];
+            [self notifyGWorkspaceOfStateChange];
         }
         
         wasFirefoxRunning = firefoxRunning;
@@ -188,7 +195,17 @@
     } else {
         stableStateCount++;
         
-        if (stableStateCount > 10) {
+        // When state is stable for Firefox being gone, we can safely reduce monitoring frequency
+        if (stableStateCount > 6 && !firefoxRunning) {  // Reduced from 10 for quicker response
+            [timer invalidate];
+            monitoringTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
+                                                               target:self
+                                                             selector:@selector(smartFirefoxCheck:)
+                                                             userInfo:nil
+                                                              repeats:YES];
+            stableStateCount = 0;
+        } else if (stableStateCount > 10 && firefoxRunning) {
+            // When Firefox is running and stable, reduce monitoring frequency
             [timer invalidate];
             monitoringTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
                                                                target:self
@@ -198,6 +215,16 @@
             stableStateCount = 0;
         }
     }
+}
+
+// New method to handle delayed termination after notifications
+- (void)delayedTerminateAfterNotifications
+{
+    // Stop monitoring now that we're about to terminate
+    [self stopFirefoxMonitoring];
+    
+    // Terminate the application
+    [NSApp terminate:self];
 }
 
 - (void)delayedTerminate
@@ -236,8 +263,30 @@
 
 - (void)applicationWillFinishLaunching:(NSNotification *)notification
 {
-    [[NSProcessInfo processInfo] setProcessName:@"Firefox"];
+    // FIRST PRIORITY: Register distributed object immediately so GWorkspace knows we're running
+    serviceConnection = [NSConnection defaultConnection];
+    [serviceConnection setRootObject:self];
     
+    NSString *appName = @"Firefox";
+    
+    if (![serviceConnection registerName:appName]) {
+        // If we can't register, another instance might be running, just exit
+        [NSApp terminate:self];
+        return;
+    }
+    
+    // SECOND PRIORITY: Post launch notification to GWorkspace
+    NSDictionary *launchInfo = @{
+        @"NSApplicationName": @"Firefox",
+        @"NSApplicationPath": [[NSBundle mainBundle] bundlePath]
+    };
+    
+    [[NSNotificationCenter defaultCenter] 
+        postNotificationName:NSWorkspaceDidLaunchApplicationNotification
+                      object:[NSWorkspace sharedWorkspace]
+                    userInfo:launchInfo];
+    
+    // THIRD PRIORITY: Set up UI elements
     NSString *iconPath = [[NSBundle mainBundle] pathForResource:@"Firefox" ofType:@"png"];
     if (iconPath && [[NSFileManager defaultManager] fileExistsAtPath:iconPath]) {
         NSImage *icon = [[NSImage alloc] initWithContentsOfFile:iconPath];
@@ -245,16 +294,6 @@
             [NSApp setApplicationIconImage:icon];
             [icon release];
         }
-    }
-    
-    serviceConnection = [NSConnection defaultConnection];
-    [serviceConnection setRootObject:self];
-    
-    NSString *appName = @"Firefox";
-    
-    if (![serviceConnection registerName:appName]) {
-        [NSApp terminate:self];
-        return;
     }
 }
 
@@ -285,8 +324,10 @@
 - (void)handleInitialFirefoxState
 {
     if ([self isFirefoxCurrentlyRunning]) {
+        // Firefox is already running, just activate its windows and don't launch a new instance
         [self activateFirefoxWindows];
     } else {
+        // Firefox is not running, safe to launch it
         [self launchFirefox];
     }
 }
@@ -744,6 +785,13 @@
 
 - (void)launchFirefox
 {
+    // Double-check that Firefox isn't already running before launching
+    if ([self isFirefoxCurrentlyRunning]) {
+        // Firefox is already running, just activate it instead of launching a new instance
+        [self activateFirefoxWindows];
+        return;
+    }
+    
     if (isFirefoxRunning && firefoxTask && [firefoxTask isRunning]) {
         [self activateFirefoxWindows];
         return;
@@ -857,8 +905,10 @@
     }
     
     if ([self isFirefoxCurrentlyRunning]) {
+        // Firefox is already running, just activate existing windows
         [self activateFirefoxWindows];
     } else {
+        // Only launch Firefox if it's not already running
         [self launchFirefox];
     }
     
