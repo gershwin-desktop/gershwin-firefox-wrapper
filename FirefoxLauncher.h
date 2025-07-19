@@ -9,6 +9,11 @@
     NSConnection *serviceConnection;
     NSTimer *monitoringTimer;
     BOOL shouldTerminateWhenFirefoxQuits;
+    
+    // Monitoring state variables (previously static)
+    BOOL wasFirefoxRunning;
+    BOOL isFirstMonitoringRun;
+    int stableStateCount;
 }
 
 - (void)applicationWillFinishLaunching:(NSNotification *)notification;
@@ -50,5 +55,6 @@
 - (void)postFirefoxLaunchNotification;
 - (void)postFirefoxTerminationNotification;
 - (void)handleInitialFirefoxState;
+- (BOOL)isAnotherLauncherInstanceRunning;
 
 @end

@@ -16,6 +16,11 @@
         serviceConnection = nil;
         monitoringTimer = nil;
         shouldTerminateWhenFirefoxQuits = YES;
+        
+        // Initialize monitoring state variables
+        wasFirefoxRunning = NO;
+        isFirstMonitoringRun = YES;
+        stableStateCount = 0;
     }
     return self;
 }
@@ -89,6 +94,51 @@
     return nil;
 }
 
+- (BOOL)isAnotherLauncherInstanceRunning
+{
+    int mib[4];
+    size_t size;
+    struct kinfo_proc *procs;
+    int nprocs;
+    int currentPID = [[NSProcessInfo processInfo] processIdentifier];
+    int launcherCount = 0;
+    
+    mib[0] = CTL_KERN;
+    mib[1] = KERN_PROC;
+    mib[2] = KERN_PROC_PROC;
+    mib[3] = 0;
+    
+    if (sysctl(mib, 4, NULL, &size, NULL, 0) < 0) {
+        return NO;
+    }
+    
+    procs = malloc(size);
+    if (procs == NULL) {
+        return NO;
+    }
+    
+    if (sysctl(mib, 4, procs, &size, NULL, 0) < 0) {
+        free(procs);
+        return NO;
+    }
+    
+    nprocs = size / sizeof(struct kinfo_proc);
+    
+    NSString *currentAppPath = [[NSBundle mainBundle] executablePath];
+    
+    for (int i = 0; i < nprocs; i++) {
+        if (procs[i].ki_pid != currentPID) {
+            NSString *execPath = [self getExecutablePathForPID:procs[i].ki_pid];
+            if (execPath && [execPath isEqualToString:currentAppPath]) {
+                launcherCount++;
+            }
+        }
+    }
+    
+    free(procs);
+    return launcherCount > 0;
+}
+
 - (void)postFirefoxLaunchNotification
 {
     NSDictionary *launchInfo = @{
@@ -119,10 +169,10 @@
 {
     [self stopFirefoxMonitoring];
     
-    static BOOL hasInitialized = NO;
-    if (!hasInitialized) {
-        hasInitialized = YES;
-    }
+    // Reset monitoring state to ensure clean state on each start
+    wasFirefoxRunning = NO;
+    isFirstMonitoringRun = YES;
+    stableStateCount = 0;
     
     NSTimeInterval interval = 0.5;
     
@@ -146,15 +196,11 @@
     NSArray *firefoxPIDs = [self getAllFirefoxProcessIDs];
     BOOL firefoxRunning = [firefoxPIDs count] > 0;
     
-    static BOOL wasRunning = NO;
-    static BOOL firstRun = YES;
-    static int stableStateCount = 0;
-    
     isFirefoxRunning = firefoxRunning;
     
-    if (firstRun) {
-        wasRunning = firefoxRunning;
-        firstRun = NO;
+    if (isFirstMonitoringRun) {
+        wasFirefoxRunning = firefoxRunning;
+        isFirstMonitoringRun = NO;
         
         if (firefoxRunning) {
             [self postFirefoxLaunchNotification];
@@ -162,10 +208,10 @@
         return;
     }
     
-    if (wasRunning != firefoxRunning) {
+    if (wasFirefoxRunning != firefoxRunning) {
         stableStateCount = 0;
         
-        if (wasRunning && !firefoxRunning) {
+        if (wasFirefoxRunning && !firefoxRunning) {
             [self postFirefoxTerminationNotification];
             
             if (shouldTerminateWhenFirefoxQuits) {
@@ -174,12 +220,11 @@
                 [NSApp terminate:self];
                 return;
             }
-        } else if (!wasRunning && firefoxRunning) {
+        } else if (!wasFirefoxRunning && firefoxRunning) {
             [self postFirefoxLaunchNotification];
         }
         
-        wasRunning = firefoxRunning;
-        
+        wasFirefoxRunning = firefoxRunning;
         stableStateCount = 0;
     } else {
         stableStateCount++;
@@ -227,6 +272,13 @@
 
 - (void)applicationWillFinishLaunching:(NSNotification *)notification
 {
+    // Check if another instance is already running
+    if ([self isAnotherLauncherInstanceRunning]) {
+        // Another instance is running, so we should exit
+        [NSApp terminate:self];
+        return;
+    }
+    
     [[NSProcessInfo processInfo] setProcessName:@"Firefox"];
     
     NSString *iconPath = [[NSBundle mainBundle] pathForResource:@"Firefox" ofType:@"png"];
@@ -238,14 +290,27 @@
         }
     }
     
+    // Set up service connection for GWorkspace integration
     serviceConnection = [NSConnection defaultConnection];
     [serviceConnection setRootObject:self];
     
+    // Try to register with a unique name that includes our PID
+    NSString *appName = [NSString stringWithFormat:@"Firefox-%d", [[NSProcessInfo processInfo] processIdentifier]];
+    
+    if (![serviceConnection registerName:appName]) {
+        // If this fails, just continue without the service connection
+        [serviceConnection release];
+        serviceConnection = nil;
+    }
+}
+
+- (void)retryServiceRegistration
+{
     NSString *appName = @"Firefox";
     
     if (![serviceConnection registerName:appName]) {
+        // If it still fails after waiting, terminate
         [NSApp terminate:self];
-        return;
     }
 }
 
