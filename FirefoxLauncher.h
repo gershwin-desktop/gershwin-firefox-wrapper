@@ -55,6 +55,5 @@
 - (void)postFirefoxLaunchNotification;
 - (void)postFirefoxTerminationNotification;
 - (void)handleInitialFirefoxState;
-- (BOOL)isAnotherLauncherInstanceRunning;
 
 @end

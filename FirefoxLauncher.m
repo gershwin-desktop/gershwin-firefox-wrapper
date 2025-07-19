@@ -94,51 +94,6 @@
     return nil;
 }
 
-- (BOOL)isAnotherLauncherInstanceRunning
-{
-    int mib[4];
-    size_t size;
-    struct kinfo_proc *procs;
-    int nprocs;
-    int currentPID = [[NSProcessInfo processInfo] processIdentifier];
-    int launcherCount = 0;
-    
-    mib[0] = CTL_KERN;
-    mib[1] = KERN_PROC;
-    mib[2] = KERN_PROC_PROC;
-    mib[3] = 0;
-    
-    if (sysctl(mib, 4, NULL, &size, NULL, 0) < 0) {
-        return NO;
-    }
-    
-    procs = malloc(size);
-    if (procs == NULL) {
-        return NO;
-    }
-    
-    if (sysctl(mib, 4, procs, &size, NULL, 0) < 0) {
-        free(procs);
-        return NO;
-    }
-    
-    nprocs = size / sizeof(struct kinfo_proc);
-    
-    NSString *currentAppPath = [[NSBundle mainBundle] executablePath];
-    
-    for (int i = 0; i < nprocs; i++) {
-        if (procs[i].ki_pid != currentPID) {
-            NSString *execPath = [self getExecutablePathForPID:procs[i].ki_pid];
-            if (execPath && [execPath isEqualToString:currentAppPath]) {
-                launcherCount++;
-            }
-        }
-    }
-    
-    free(procs);
-    return launcherCount > 0;
-}
-
 - (void)postFirefoxLaunchNotification
 {
     NSDictionary *launchInfo = @{
@@ -272,13 +227,6 @@
 
 - (void)applicationWillFinishLaunching:(NSNotification *)notification
 {
-    // Check if another instance is already running
-    if ([self isAnotherLauncherInstanceRunning]) {
-        // Another instance is running, so we should exit
-        [NSApp terminate:self];
-        return;
-    }
-    
     [[NSProcessInfo processInfo] setProcessName:@"Firefox"];
     
     NSString *iconPath = [[NSBundle mainBundle] pathForResource:@"Firefox" ofType:@"png"];
@@ -290,17 +238,14 @@
         }
     }
     
-    // Set up service connection for GWorkspace integration
     serviceConnection = [NSConnection defaultConnection];
     [serviceConnection setRootObject:self];
     
-    // Try to register with a unique name that includes our PID
-    NSString *appName = [NSString stringWithFormat:@"Firefox-%d", [[NSProcessInfo processInfo] processIdentifier]];
+    NSString *appName = @"Firefox";
     
     if (![serviceConnection registerName:appName]) {
-        // If this fails, just continue without the service connection
-        [serviceConnection release];
-        serviceConnection = nil;
+        [NSApp terminate:self];
+        return;
     }
 }
 
@@ -319,6 +264,13 @@
     [self startSmartFirefoxMonitoring];
     
     [self performSelector:@selector(handleInitialFirefoxState) withObject:nil afterDelay:0.1];
+}
+
+- (void)activateFirefoxAndExit
+{
+    [self activateFirefoxWindows];
+    // Small delay to ensure activation completes before terminating
+    [self performSelector:@selector(terminate:) withObject:self afterDelay:0.2];
 }
 
 - (void)handleInitialFirefoxState
