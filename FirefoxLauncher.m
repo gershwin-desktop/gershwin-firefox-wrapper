@@ -2,7 +2,10 @@
 #import <sys/types.h>
 #import <sys/sysctl.h>
 #import <sys/user.h>
+#import <sys/event.h>
 #import <signal.h>
+#import <unistd.h>
+#import <errno.h>
 
 // FreeBSD libdispatch support check
 #ifndef HAS_LIBDISPATCH
@@ -10,19 +13,7 @@
 #endif
 
 // Constants for configuration
-static const NSTimeInterval kDefaultMonitoringInterval = 0.2;
-static const NSTimeInterval kSlowMonitoringInterval = 2.0;
 static const NSTimeInterval kWindowListCacheTimeout = 1.0;
-static const NSTimeInterval kDockStateVerificationInterval = 0.5;
-static const NSTimeInterval kConnectionRetryInterval = 1.0;
-static const int kMaxConnectionRetries = 5;
-static const int kStableStateThreshold = 6;
-static const NSTimeInterval kCrashDetectionWindow = 30.0;
-
-// State persistence keys
-static NSString * const kFirefoxWasPreviouslyRunning = @"FirefoxWasPreviouslyRunning";
-static NSString * const kDockIconWasVisible = @"DockIconWasVisible";
-static NSString * const kLastShutdownTime = @"LastShutdownTime";
 
 @implementation FirefoxLauncher
 
@@ -36,37 +27,35 @@ static NSString * const kLastShutdownTime = @"LastShutdownTime";
         isFirefoxRunning = NO;
         firefoxTask = nil;
         serviceConnection = nil;
-        monitoringTimer = nil;
-        retryTimer = nil;
-        shouldTerminateWhenFirefoxQuits = YES;
         
-        // Initialize monitoring state
-        wasFirefoxRunning = NO;
-        isFirstMonitoringRun = YES;
-        stableStateCount = 0;
-        lastStateChangeTime = [[NSDate date] retain];
+        // Initialize event-driven monitoring state
+        firefoxPID = 0;
+        terminationInProgress = NO;
+        
+#if HAS_LIBDISPATCH
+        procMonitorSource = NULL;
+        monitorQueue = dispatch_queue_create("firefox.monitor", DISPATCH_QUEUE_SERIAL);
+#endif
+        
+        // Initialize kqueue
+        kqueueFD = -1;
+        kqueueThread = nil;
         
         // Initialize connection state
         connectionEstablished = NO;
-        connectionRetryCount = 0;
+        isPrimaryInstance = NO;
         
         // Initialize dock management
         dockIconVisible = NO;
         isTransformingProcess = NO;
         
-        // Initialize performance optimization
+        // Initialize window caching
         cachedWindowList = [[NSMutableArray alloc] init];
         lastWindowListUpdate = nil;
         windowListCacheTimeout = kWindowListCacheTimeout;
         
-        // Initialize edge case handling
-        terminationPending = NO;
+        // Initialize system state
         systemSleepDetected = NO;
-        firefoxCrashedRecently = NO;
-        lastCrashTime = nil;
-        
-        // Load persistent state
-        [self loadPersistentState];
         
         // Register for system events
         [self registerForSystemEvents];
@@ -78,24 +67,26 @@ static NSString * const kLastShutdownTime = @"LastShutdownTime";
 
 - (void)applicationWillFinishLaunching:(NSNotification *)notification
 {
-    // PRIORITY 1: Establish service connection with retry logic
-    if (![self establishServiceConnection]) {
-        // Schedule retry if initial connection fails
-        retryTimer = [NSTimer scheduledTimerWithTimeInterval:kConnectionRetryInterval
-                                                       target:self
-                                                     selector:@selector(retryServiceConnection:)
-                                                     userInfo:nil
-                                                      repeats:YES];
+    // PRIORITY 1: Establish single instance
+    if (![self establishSingleInstance]) {
+        // Another instance is running, delegate and exit
+        [self delegateToExistingInstance];
+        [NSApp terminate:self];
         return;
     }
     
-    // PRIORITY 2: Set up initial dock state
+    // PRIORITY 2: Set up service connection
+    if (![self establishServiceConnection]) {
+        NSLog(@"Warning: Could not establish service connection");
+    }
+    
+    // PRIORITY 3: Set up initial dock state
     [self ensureDockIconVisible];
     
-    // PRIORITY 3: Post initial launch notification
+    // PRIORITY 4: Post initial launch notification
     [self postFirefoxLaunchNotification];
     
-    // PRIORITY 4: Set up icon if available
+    // PRIORITY 5: Set up application icon
     NSString *iconPath = [[NSBundle mainBundle] pathForResource:@"Firefox" ofType:@"png"];
     if (iconPath && [[NSFileManager defaultManager] fileExistsAtPath:iconPath]) {
         NSImage *icon = [[NSImage alloc] initWithContentsOfFile:iconPath];
@@ -108,31 +99,25 @@ static NSString * const kLastShutdownTime = @"LastShutdownTime";
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification
 {
-    [self startSmartFirefoxMonitoring];
     [self performSelector:@selector(handleInitialFirefoxState) withObject:nil afterDelay:0.1];
 }
 
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)theApplication hasVisibleWindows:(BOOL)flag
 {
-    // Cancel pending termination if user reactivates
-    if (terminationPending) {
-        [NSObject cancelPreviousPerformRequestsWithTarget:self 
-                                                 selector:@selector(delayedTerminate) 
-                                                   object:nil];
-        terminationPending = NO;
-    }
-    
     if ([self isFirefoxCurrentlyRunning]) {
         [self activateFirefoxWindows];
     } else {
         [self launchFirefox];
     }
-    
     return NO;
 }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender
 {
+    if (terminationInProgress) {
+        return NSTerminateNow;
+    }
+    
     if ([self isFirefoxCurrentlyRunning]) {
         return NSTerminateCancel;
     }
@@ -141,8 +126,7 @@ static NSString * const kLastShutdownTime = @"LastShutdownTime";
 
 - (void)applicationWillTerminate:(NSNotification *)notification
 {
-    [self stopFirefoxMonitoring];
-    [self savePersistentState];
+    [self stopEventDrivenMonitoring];
     [self invalidateServiceConnection];
     
     if (firefoxTask) {
@@ -154,180 +138,123 @@ static NSString * const kLastShutdownTime = @"LastShutdownTime";
     }
 }
 
-#pragma mark - Dynamic Dock Management (GNUstep/X11 Compatible)
+#pragma mark - Single Instance Management
 
-- (void)ensureDockIconVisible
+- (BOOL)establishSingleInstance
 {
-    if (dockIconVisible || isTransformingProcess) {
-        return;
+    NSConnection *connection = [NSConnection defaultConnection];
+    [connection setRootObject:self];
+    
+    // Try to register as the primary instance
+    isPrimaryInstance = [connection registerName:@"Firefox"];
+    
+    if (!isPrimaryInstance) {
+        // Check if existing instance is actually running
+        NSConnection *existingConnection = [NSConnection connectionWithRegisteredName:@"Firefox" host:nil];
+        if (existingConnection) {
+            id<FirefoxLauncherProtocol> existingLauncher = (id<FirefoxLauncherProtocol>)[existingConnection rootProxy];
+            if (existingLauncher) {
+                NS_DURING
+                    // Test connection
+                    BOOL isRunning = [existingLauncher isRunning];
+                    (void)isRunning; // Suppress unused warning
+                    return NO; // Valid existing instance found
+                NS_HANDLER
+                    // Connection failed, existing instance is dead
+                    isPrimaryInstance = [connection registerName:@"Firefox"];
+                NS_ENDHANDLER
+            }
+        }
     }
     
-    isTransformingProcess = YES;
-    [self updateDockIconState:YES];
-    
-    // Schedule verification
-    dockStateVerificationTimer = [NSTimer scheduledTimerWithTimeInterval:kDockStateVerificationInterval
-                                                                   target:self
-                                                                 selector:@selector(verifyDockState:)
-                                                                 userInfo:@{@"expectedState": @YES}
-                                                                  repeats:NO];
+    return isPrimaryInstance;
 }
 
-- (void)ensureDockIconHidden
+- (void)delegateToExistingInstance
 {
-    if (!dockIconVisible || isTransformingProcess) {
-        return;
-    }
-    
-    isTransformingProcess = YES;
-    [self updateDockIconState:NO];
-    
-    // Schedule verification
-    dockStateVerificationTimer = [NSTimer scheduledTimerWithTimeInterval:kDockStateVerificationInterval
-                                                                   target:self
-                                                                 selector:@selector(verifyDockState:)
-                                                                 userInfo:@{@"expectedState": @NO}
-                                                                  repeats:NO];
-}
-
-- (void)updateDockIconState:(BOOL)visible
-{
-    // For GNUstep/X11, we use application activation policy simulation
-    if (visible) {
-        // Make application visible in dock-like panels
-        [NSApp activateIgnoringOtherApps:YES];
-        dockIconVisible = YES;
-        [self updateStateValue:[NSNumber numberWithBool:YES] forKey:kDockIconWasVisible];
-    } else {
-        // Hide application from dock-like panels  
-        [NSApp hide:self];
-        dockIconVisible = NO;
-        [self updateStateValue:[NSNumber numberWithBool:NO] forKey:kDockIconWasVisible];
-    }
-    
-    // Small delay to ensure state change completes
-#if HAS_LIBDISPATCH
-    // Use GCD if available (preferred)
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.1 * NSEC_PER_SEC), 
-                   dispatch_get_main_queue(), ^{
-        self->isTransformingProcess = NO;
-    });
-#else
-    // Fallback to NSObject performSelector
-    [self performSelector:@selector(completeTransformationProcess) withObject:nil afterDelay:0.1];
-#endif
-}
-
-- (void)completeTransformationProcess
-{
-    isTransformingProcess = NO;
-}
-
-- (BOOL)isDockIconCurrentlyVisible
-{
-    // On GNUstep/X11, check if application is active/visible
-    return dockIconVisible && ![NSApp isHidden];
-}
-
-- (void)verifyDockState:(NSTimer *)timer
-{
-    NSDictionary *userInfo = [timer userInfo];
-    BOOL expectedState = [[userInfo objectForKey:@"expectedState"] boolValue];
-    
-    if ([self isDockIconCurrentlyVisible] != expectedState) {
-        // State verification failed, schedule retry
-        retryTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
-                                                       target:self
-                                                     selector:@selector(retryDockOperation:)
-                                                     userInfo:userInfo
-                                                      repeats:NO];
-    }
-}
-
-- (void)retryDockOperation:(NSTimer *)timer
-{
-    NSDictionary *userInfo = [timer userInfo];
-    BOOL expectedState = [[userInfo objectForKey:@"expectedState"] boolValue];
-    
-    if (expectedState) {
-        [self ensureDockIconVisible];
-    } else {
-        [self ensureDockIconHidden];
-    }
-}
-
-#pragma mark - Enhanced Connection Management
-
-- (BOOL)establishServiceConnection
-{
-    if (connectionEstablished) {
-        return YES;
-    }
-    
-    serviceConnection = [[NSConnection defaultConnection] retain];
-    [serviceConnection setRootObject:self];
-    
-    // Set protocol for performance optimization
-    [serviceConnection setRootObject:self];
-    
-    NSString *appName = @"Firefox";
-    
-    if ([serviceConnection registerName:appName]) {
-        connectionEstablished = YES;
-        connectionRetryCount = 0;
-        return YES;
-    }
-    
-    // Check if another instance exists
-    NSConnection *existingConnection = [NSConnection connectionWithRegisteredName:appName host:nil];
+    NSConnection *existingConnection = [NSConnection connectionWithRegisteredName:@"Firefox" host:nil];
     if (existingConnection) {
-        // Another instance is running, delegate to it and exit
         id<FirefoxLauncherProtocol> existingLauncher = (id<FirefoxLauncherProtocol>)[existingConnection rootProxy];
         if (existingLauncher) {
             NS_DURING
                 [existingLauncher activateIgnoringOtherApps:YES];
+                NSLog(@"Delegated to existing Firefox wrapper instance");
             NS_HANDLER
+                NSLog(@"Failed to delegate to existing instance");
             NS_ENDHANDLER
         }
-        [NSApp terminate:self];
-        return NO;
     }
-    
-    return NO;
 }
 
-- (void)retryServiceConnection:(NSTimer *)timer
+#pragma mark - Firefox Process Management
+
+- (void)launchFirefox
 {
-    connectionRetryCount++;
-    
-    if (connectionRetryCount > kMaxConnectionRetries) {
-        [timer invalidate];
-        retryTimer = nil;
-        [NSApp terminate:self];
+    [self launchFirefoxWithArgs:@[]];
+}
+
+- (void)launchFirefoxWithArgs:(NSArray *)arguments
+{
+    // Double-check that Firefox isn't already running
+    if ([self isFirefoxCurrentlyRunning]) {
+        [self activateFirefoxWindows];
         return;
     }
     
-    if ([self establishServiceConnection]) {
-        [timer invalidate];
-        retryTimer = nil;
+    if (firefoxTask && [firefoxTask isRunning]) {
+        [self activateFirefoxWindows];
+        return;
+    }
+    
+    // Post launch notification
+    [self postFirefoxLaunchNotification];
+    
+    firefoxTask = [[NSTask alloc] init];
+    [firefoxTask setLaunchPath:firefoxExecutablePath];
+    [firefoxTask setArguments:arguments];
+    
+    NSMutableDictionary *environment = [[[NSProcessInfo processInfo] environment] mutableCopy];
+    [firefoxTask setEnvironment:environment];
+    [environment release];
+    
+    // CRITICAL: Register for termination notification BEFORE launch
+    [[NSNotificationCenter defaultCenter] 
+        addObserver:self 
+        selector:@selector(handleFirefoxTermination:) 
+        name:NSTaskDidTerminateNotification 
+        object:firefoxTask];
+    
+    NS_DURING
+        [firefoxTask launch];
+        isFirefoxRunning = YES;
+        firefoxPID = [firefoxTask processIdentifier];
         
-        // Continue with initialization
-        [self ensureDockIconVisible];
-        [self postFirefoxLaunchNotification];
-    }
+        // Start event-driven monitoring
+        [self startEventDrivenMonitoring:firefoxPID];
+        
+        // Schedule window activation
+        [self performSelector:@selector(waitForFirefoxToStart) withObject:nil afterDelay:0.5];
+        
+    NS_HANDLER
+        isFirefoxRunning = NO;
+        firefoxPID = 0;
+        
+        [[NSNotificationCenter defaultCenter] removeObserver:self 
+                                                        name:NSTaskDidTerminateNotification 
+                                                      object:firefoxTask];
+        [firefoxTask release];
+        firefoxTask = nil;
+        
+        NSAlert *alert = [[NSAlert alloc] init];
+        [alert setMessageText:@"Firefox Launch Error"];
+        [alert setInformativeText:[NSString stringWithFormat:@"Could not launch Firefox from %@. Please check that Firefox is installed.", firefoxExecutablePath]];
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+        [alert release];
+        
+        [NSApp terminate:self];
+    NS_ENDHANDLER
 }
-
-- (void)invalidateServiceConnection
-{
-    if (serviceConnection) {
-        [serviceConnection invalidate];
-        [serviceConnection release];
-        serviceConnection = nil;
-        connectionEstablished = NO;
-    }
-}
-
-#pragma mark - Enhanced Firefox Process Management
 
 - (NSArray *)getAllFirefoxProcessIDs
 {
@@ -398,177 +325,375 @@ static NSString * const kLastShutdownTime = @"LastShutdownTime";
     return nil;
 }
 
-- (void)launchFirefox
+#pragma mark - Event-Driven Monitoring System
+
+- (void)startEventDrivenMonitoring:(pid_t)firefoxProcessID
 {
-    // Check for recent crash
-    if ([self isRecentCrash]) {
-        // Add delay before launching after crash
-        [self performSelector:@selector(launchFirefox) withObject:nil afterDelay:2.0];
+    if (terminationInProgress) return;
+    
+    firefoxPID = firefoxProcessID;
+    
+    NSLog(@"Starting event-driven monitoring for Firefox PID: %d", firefoxPID);
+    
+    // Primary: kqueue process monitoring (most reliable on FreeBSD)
+    [self setupKqueueChildTracking:firefoxPID];
+    
+#if HAS_LIBDISPATCH
+    // Secondary: GCD process monitoring as backup
+    [self setupGCDProcessMonitoring:firefoxPID];
+#endif
+    
+    // Tertiary: Fallback polling for safety (very light)
+    [self performSelector:@selector(checkFirefoxStatus) withObject:nil afterDelay:2.0];
+}
+
+- (void)stopEventDrivenMonitoring
+{
+    NSLog(@"Stopping event-driven monitoring");
+    
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(checkFirefoxStatus) object:nil];
+    
+#if HAS_LIBDISPATCH
+    [self cleanupGCDMonitoring];
+#endif
+    
+    [self stopKqueueMonitoring];
+}
+
+- (void)firefoxProcessExited:(int)exitStatus
+{
+    if (terminationInProgress) return;
+    
+    NSLog(@"Firefox process exited with status: %d (thread: %@)", exitStatus, [NSThread currentThread]);
+    
+    // Double-check that Firefox is really gone
+    if (![self isFirefoxCurrentlyRunning]) {
+        [self postFirefoxTerminationNotification];
+        
+        // Always call termination on main thread
+        if ([NSThread isMainThread]) {
+            [self initiateWrapperTermination];
+        } else {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self initiateWrapperTermination];
+            });
+        }
+    } else {
+        NSLog(@"Firefox process exit detected but other Firefox processes still running");
+        // Reschedule check in case this was just a child process
+        [self performSelector:@selector(checkFirefoxStatus) withObject:nil afterDelay:1.0];
+    }
+}
+
+// Add fallback polling method for safety
+- (void)checkFirefoxStatus
+{
+    if (terminationInProgress) return;
+    
+    // Check for test file trigger
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/tmp/test-firefox-wrapper-termination"]) {
+        [[NSFileManager defaultManager] removeItemAtPath:@"/tmp/test-firefox-wrapper-termination" error:nil];
+        [self testTermination];
         return;
     }
     
-    // Double-check that Firefox isn't already running
-    if ([self isFirefoxCurrentlyRunning]) {
-        [self activateFirefoxWindows];
+    NSLog(@"Checking Firefox status - PID: %d", firefoxPID);
+    
+    // Check if our tracked Firefox process is still running
+    if (firefoxPID > 0) {
+        if (kill(firefoxPID, 0) == -1 && errno == ESRCH) {
+            NSLog(@"Fallback check: Firefox PID %d no longer exists", firefoxPID);
+            [self firefoxProcessExited:0];
+            return;
+        } else {
+            NSLog(@"Firefox PID %d still responding to kill(0)", firefoxPID);
+        }
+    }
+    
+    // Also check the general Firefox process list
+    NSArray *firefoxPIDs = [self getAllFirefoxProcessIDs];
+    NSLog(@"Found %lu Firefox processes: %@", [firefoxPIDs count], firefoxPIDs);
+    
+    if ([firefoxPIDs count] == 0) {
+        NSLog(@"Fallback check: No Firefox processes found - initiating termination");
+        [self firefoxProcessExited:0];
         return;
     }
     
-    if (isFirefoxRunning && firefoxTask && [firefoxTask isRunning]) {
-        [self activateFirefoxWindows];
+    // Firefox is still running, check again later
+    NSLog(@"Firefox still running, scheduling next check in 3 seconds");
+    [self performSelector:@selector(checkFirefoxStatus) withObject:nil afterDelay:3.0];
+}
+
+- (void)initiateWrapperTermination
+{
+    if (terminationInProgress) return;
+    
+    terminationInProgress = YES;
+    
+    NSLog(@"=== INITIATING WRAPPER TERMINATION === (thread: %@)", [NSThread currentThread]);
+    
+    // Stop all monitoring
+    [self stopEventDrivenMonitoring];
+    
+    // MUST be called on main thread
+    if (![NSThread isMainThread]) {
+        NSLog(@"ERROR: initiateWrapperTermination called from background thread!");
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            NSLog(@"Calling [NSApp terminate:self] from main thread");
+            [NSApp terminate:self];
+        });
+    } else {
+        NSLog(@"Calling [NSApp terminate:self] from main thread");
+        [NSApp terminate:self];
+    }
+    
+    // Emergency exit if NSApp terminate doesn't work
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2.0 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        NSLog(@"Emergency exit - NSApp terminate may have failed");
+        exit(0);
+    });
+}
+
+- (void)emergencyExit
+{
+    NSLog(@"Emergency exit - NSApp terminate may have failed");
+    exit(0);
+}
+
+#if HAS_LIBDISPATCH
+#pragma mark - GCD Process Monitoring
+
+- (void)setupGCDProcessMonitoring:(pid_t)pid
+{
+    if (procMonitorSource) {
+        dispatch_source_cancel(procMonitorSource);
+        procMonitorSource = NULL;
+    }
+    
+    procMonitorSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC, pid,
+                                              DISPATCH_PROC_EXIT, monitorQueue);
+    
+    if (!procMonitorSource) {
+        NSLog(@"Failed to create GCD process monitor for PID: %d", pid);
         return;
     }
     
-    // Post launch notification
-    [self postFirefoxLaunchNotification];
-    
-    firefoxTask = [[NSTask alloc] init];
-    [firefoxTask setLaunchPath:firefoxExecutablePath];
-    [firefoxTask setArguments:@[]];
-    
-    NSMutableDictionary *environment = [[[NSProcessInfo processInfo] environment] mutableCopy];
-    [firefoxTask setEnvironment:environment];
-    [environment release];
-    
-    [[NSNotificationCenter defaultCenter] 
-        addObserver:self 
-        selector:@selector(handleFirefoxTermination:) 
-        name:NSTaskDidTerminateNotification 
-        object:firefoxTask];
-    
-    NS_DURING
-        [firefoxTask launch];
-        isFirefoxRunning = YES;
+    // Event handler - called immediately when Firefox exits
+    dispatch_source_set_event_handler(procMonitorSource, ^{
+        uint32_t flags = dispatch_source_get_data(procMonitorSource);
         
-        [self updateStateValue:@YES forKey:kFirefoxWasPreviouslyRunning];
+        if (flags & DISPATCH_PROC_EXIT) {
+            NSLog(@"GCD detected Firefox exit");
+            [self firefoxProcessExited:0];
+        }
+    });
+    
+    // Cleanup handler
+    dispatch_source_set_cancel_handler(procMonitorSource, ^{
+        procMonitorSource = NULL;
+    });
+    
+    // Start monitoring
+    dispatch_resume(procMonitorSource);
+    
+    NSLog(@"GCD process monitoring started for PID: %d", pid);
+}
+
+- (void)cleanupGCDMonitoring
+{
+    if (procMonitorSource) {
+        dispatch_source_cancel(procMonitorSource);
+        procMonitorSource = NULL;
+    }
+}
+#endif
+
+#pragma mark - kqueue Child Process Tracking
+
+- (void)setupKqueueChildTracking:(pid_t)parentPID
+{
+    [self stopKqueueMonitoring];
+    
+    kqueueFD = kqueue();
+    if (kqueueFD == -1) {
+        NSLog(@"Failed to create kqueue for child tracking");
+        return;
+    }
+    
+    // Set up direct process monitoring
+    struct kevent event;
+    EV_SET(&event, parentPID, EVFILT_PROC, EV_ADD | EV_ENABLE | EV_ONESHOT,
+           NOTE_EXIT, 0, NULL);
+    
+    if (kevent(kqueueFD, &event, 1, NULL, 0, NULL) == -1) {
+        NSLog(@"Failed to register kqueue process monitoring for PID: %d", parentPID);
+        close(kqueueFD);
+        kqueueFD = -1;
+        return;
+    }
+    
+    // Start monitoring thread
+    kqueueThread = [[NSThread alloc] initWithTarget:self 
+                                            selector:@selector(kqueueMonitoringThread:) 
+                                              object:@(parentPID)];
+    [kqueueThread start];
+    
+    NSLog(@"kqueue process monitoring started for PID: %d", parentPID);
+}
+
+- (void)kqueueMonitoringThread:(id)arg
+{
+    NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+    
+    pid_t parentPID = [(NSNumber *)arg intValue];
+    
+    NSLog(@"kqueue monitoring thread started for PID: %d", parentPID);
+    
+    // Event monitoring loop - wait for process to exit
+    struct kevent event;
+    while (!terminationInProgress) {
+        int nev = kevent(kqueueFD, NULL, 0, &event, 1, NULL);
         
-        // Schedule window activation
-        [self performSelector:@selector(waitForFirefoxToStart) withObject:nil afterDelay:0.5];
+        if (nev == -1) {
+            if (errno == EINTR) continue;
+            NSLog(@"kqueue error: %s", strerror(errno));
+            break;
+        }
         
-    NS_HANDLER
-        isFirefoxRunning = NO;
+        if (nev > 0) {
+            if (event.fflags & NOTE_EXIT && (pid_t)event.ident == parentPID) {
+                NSLog(@"kqueue detected Firefox process exit (PID: %lu, exit status: %ld)", 
+                      event.ident, event.data);
+                [self firefoxProcessExited:(int)event.data];
+                break;
+            }
+        }
+    }
+    
+    [pool release];
+}
+
+- (void)stopKqueueMonitoring
+{
+    if (kqueueThread) {
+        // The thread will exit when terminationInProgress is set
+        [kqueueThread release];
+        kqueueThread = nil;
+    }
+    
+    if (kqueueFD != -1) {
+        close(kqueueFD);
+        kqueueFD = -1;
+    }
+}
+
+#pragma mark - Firefox Termination Handler
+
+- (void)handleFirefoxTermination:(NSNotification *)notification
+{
+    NSTask *task = [notification object];
+    
+    if (task == firefoxTask) {
+        int exitStatus = [task terminationStatus];
+        NSTaskTerminationReason reason = [task terminationReason];
+        
+        NSLog(@"NSTask detected Firefox termination - Status: %d, Reason: %d", exitStatus, (int)reason);
+        
+        [[NSNotificationCenter defaultCenter] removeObserver:self 
+                                                        name:NSTaskDidTerminateNotification 
+                                                      object:firefoxTask];
         [firefoxTask release];
         firefoxTask = nil;
+        isFirefoxRunning = NO;
+        firefoxPID = 0;
         
-        NSAlert *alert = [[NSAlert alloc] init];
-        [alert setMessageText:@"Firefox Launch Error"];
-        [alert setInformativeText:[NSString stringWithFormat:@"Could not launch Firefox from %@. Please check that Firefox is installed.", firefoxExecutablePath]];
-        [alert addButtonWithTitle:@"OK"];
-        [alert runModal];
-        [alert release];
-        
-        [NSApp terminate:self];
-    NS_ENDHANDLER
-}
-
-#pragma mark - Enhanced Monitoring System
-
-- (void)startSmartFirefoxMonitoring
-{
-    [self stopFirefoxMonitoring];
-    
-    // Reset monitoring state
-    wasFirefoxRunning = NO;
-    isFirstMonitoringRun = YES;
-    stableStateCount = 0;
-    [lastStateChangeTime release];
-    lastStateChangeTime = [[NSDate date] retain];
-    
-    // Determine initial monitoring interval
-    NSTimeInterval interval = [self shouldUseAggressiveMonitoring] ? kDefaultMonitoringInterval : kSlowMonitoringInterval;
-    
-    monitoringTimer = [NSTimer scheduledTimerWithTimeInterval:interval
-                                                       target:self
-                                                     selector:@selector(smartFirefoxCheck:)
-                                                     userInfo:nil
-                                                      repeats:YES];
-}
-
-- (void)stopFirefoxMonitoring
-{
-    if (monitoringTimer) {
-        [monitoringTimer invalidate];
-        monitoringTimer = nil;
+        [self firefoxProcessExited:exitStatus];
     }
 }
 
-- (void)smartFirefoxCheck:(NSTimer *)timer
+#pragma mark - Dynamic Dock Management
+
+- (void)ensureDockIconVisible
 {
-    // Check for system sleep
-    if (systemSleepDetected) {
-        [self handleSystemWake:nil];
+    if (dockIconVisible || isTransformingProcess) {
         return;
     }
     
-    NSArray *firefoxPIDs = [self getAllFirefoxProcessIDs];
-    BOOL firefoxRunning = [firefoxPIDs count] > 0;
+    isTransformingProcess = YES;
+    [self updateDockIconState:YES];
     
-    isFirefoxRunning = firefoxRunning;
-    
-    if (isFirstMonitoringRun) {
-        wasFirefoxRunning = firefoxRunning;
-        isFirstMonitoringRun = NO;
-        
-        if (firefoxRunning) {
-            [self postFirefoxLaunchNotification];
-        }
+#if HAS_LIBDISPATCH
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.1 * NSEC_PER_SEC), 
+                   dispatch_get_main_queue(), ^{
+        [self completeTransformationProcess];
+    });
+#else
+    [self performSelector:@selector(completeTransformationProcess) withObject:nil afterDelay:0.1];
+#endif
+}
+
+- (void)ensureDockIconHidden
+{
+    if (!dockIconVisible || isTransformingProcess) {
         return;
     }
     
-    // Check for state change
-    if (wasFirefoxRunning != firefoxRunning) {
-        [lastStateChangeTime release];
-        lastStateChangeTime = [[NSDate date] retain];
-        stableStateCount = 0;
-        
-        if (wasFirefoxRunning && !firefoxRunning) {
-            // Firefox quit
-            [self detectFirefoxCrash];
-            [self postFirefoxTerminationNotification];
-            [self notifyGWorkspaceOfStateChange];
-            
-            if (shouldTerminateWhenFirefoxQuits) {
-                [self performSelector:@selector(delayedTerminateAfterNotifications) 
-                           withObject:nil 
-                           afterDelay:0.1];
-                return;
-            }
-        } else if (!wasFirefoxRunning && firefoxRunning) {
-            // Firefox started
-            [self postFirefoxLaunchNotification];
-            [self notifyGWorkspaceOfStateChange];
-        }
-        
-        wasFirefoxRunning = firefoxRunning;
+    isTransformingProcess = YES;
+    [self updateDockIconState:NO];
+    
+#if HAS_LIBDISPATCH
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.1 * NSEC_PER_SEC), 
+                   dispatch_get_main_queue(), ^{
+        [self completeTransformationProcess];
+    });
+#else
+    [self performSelector:@selector(completeTransformationProcess) withObject:nil afterDelay:0.1];
+#endif
+}
+
+- (void)updateDockIconState:(BOOL)visible
+{
+    if (visible) {
+        [NSApp activateIgnoringOtherApps:YES];
+        dockIconVisible = YES;
     } else {
-        stableStateCount++;
-        [self optimizeMonitoringInterval];
+        [NSApp hide:self];
+        dockIconVisible = NO;
     }
 }
 
-- (void)optimizeMonitoringInterval
+- (void)completeTransformationProcess
 {
-    // Adjust monitoring frequency based on state stability
-    if (stableStateCount > kStableStateThreshold) {
-        NSTimeInterval currentInterval = [monitoringTimer timeInterval];
-        NSTimeInterval newInterval = !isFirefoxRunning ? kSlowMonitoringInterval : kSlowMonitoringInterval;
-        
-        if (currentInterval != newInterval) {
-            [monitoringTimer invalidate];
-            monitoringTimer = [NSTimer scheduledTimerWithTimeInterval:newInterval
-                                                               target:self
-                                                             selector:@selector(smartFirefoxCheck:)
-                                                             userInfo:nil
-                                                              repeats:YES];
-        }
-        stableStateCount = 0;
-    }
+    isTransformingProcess = NO;
 }
 
-- (BOOL)shouldUseAggressiveMonitoring
+- (BOOL)isDockIconCurrentlyVisible
 {
-    // Use aggressive monitoring during transitions or after crashes
-    return firefoxCrashedRecently || 
-           [[NSDate date] timeIntervalSinceDate:lastStateChangeTime] < 10.0;
+    return dockIconVisible && ![NSApp isHidden];
+}
+
+#pragma mark - Connection Management
+
+- (BOOL)establishServiceConnection
+{
+    if (connectionEstablished) {
+        return YES;
+    }
+    
+    // Connection already established in establishSingleInstance
+    connectionEstablished = isPrimaryInstance;
+    return connectionEstablished;
+}
+
+- (void)invalidateServiceConnection
+{
+    if (serviceConnection) {
+        [serviceConnection invalidate];
+        [serviceConnection release];
+        serviceConnection = nil;
+        connectionEstablished = NO;
+    }
 }
 
 #pragma mark - Window Management with Caching
@@ -678,55 +803,10 @@ static NSString * const kLastShutdownTime = @"LastShutdownTime";
     [self activateFirefoxWithWmctrl];
 }
 
-#pragma mark - State Persistence
-
-- (void)loadPersistentState
-{
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    persistentState = [[NSMutableDictionary alloc] init];
-    
-    // Load previous state values
-    id value = [defaults objectForKey:kFirefoxWasPreviouslyRunning];
-    if (value) [persistentState setObject:value forKey:kFirefoxWasPreviouslyRunning];
-    
-    value = [defaults objectForKey:kDockIconWasVisible];
-    if (value) [persistentState setObject:value forKey:kDockIconWasVisible];
-    
-    value = [defaults objectForKey:kLastShutdownTime];
-    if (value) [persistentState setObject:value forKey:kLastShutdownTime];
-}
-
-- (void)savePersistentState
-{
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    
-    for (NSString *key in persistentState) {
-        [defaults setObject:[persistentState objectForKey:key] forKey:key];
-    }
-    
-    [defaults setObject:[NSDate date] forKey:kLastShutdownTime];
-    [defaults synchronize];
-}
-
-- (void)updateStateValue:(id)value forKey:(NSString *)key
-{
-    if (value) {
-        [persistentState setObject:value forKey:key];
-    } else {
-        [persistentState removeObjectForKey:key];
-    }
-}
-
-- (id)getStateValueForKey:(NSString *)key
-{
-    return [persistentState objectForKey:key];
-}
-
-#pragma mark - System Event Handling (GNUstep Compatible)
+#pragma mark - System Event Handling
 
 - (void)registerForSystemEvents
 {
-    // Register for workspace notifications (GNUstep equivalent)
     [[[NSWorkspace sharedWorkspace] notificationCenter] 
         addObserver:self
         selector:@selector(handleSystemSleep:)
@@ -743,74 +823,26 @@ static NSString * const kLastShutdownTime = @"LastShutdownTime";
 - (void)handleSystemSleep:(NSNotification *)notification
 {
     systemSleepDetected = YES;
-    [self stopFirefoxMonitoring];
+    [self stopEventDrivenMonitoring];
 }
 
 - (void)handleSystemWake:(NSNotification *)notification
 {
     systemSleepDetected = NO;
-    
-    // Invalidate caches
     [self invalidateWindowListCache];
     
-    // Restart monitoring with fresh state
-    [self startSmartFirefoxMonitoring];
+    if (firefoxPID > 0) {
+        [self startEventDrivenMonitoring:firefoxPID];
+    }
     
-    // Verify and restore dock state
 #if HAS_LIBDISPATCH
-    // Use GCD if available (preferred)
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.0 * NSEC_PER_SEC), 
                    dispatch_get_main_queue(), ^{
         [self ensureDockIconVisible];
     });
 #else
-    // Fallback to NSObject performSelector
     [self performSelector:@selector(ensureDockIconVisible) withObject:nil afterDelay:1.0];
 #endif
-}
-
-#pragma mark - Edge Case Handling
-
-- (void)detectFirefoxCrash
-{
-    // Check if Firefox quit unexpectedly (crashed)
-    if (firefoxTask && [firefoxTask terminationStatus] != 0) {
-        [self handleFirefoxCrash];
-    }
-}
-
-- (void)handleFirefoxCrash
-{
-    firefoxCrashedRecently = YES;
-    [lastCrashTime release];
-    lastCrashTime = [[NSDate date] retain];
-    
-    // Schedule cleanup
-    [self performSelector:@selector(cleanupAfterFirefoxCrash) withObject:nil afterDelay:1.0];
-}
-
-- (void)cleanupAfterFirefoxCrash
-{
-    // Clean up any zombie processes
-    NSArray *remainingPIDs = [self getAllFirefoxProcessIDs];
-    for (NSNumber *pidNumber in remainingPIDs) {
-        pid_t pid = [pidNumber intValue];
-        kill(pid, SIGTERM);
-    }
-    
-    // Mark crash handling as complete after delay
-    [self performSelector:@selector(clearCrashFlag) withObject:nil afterDelay:kCrashDetectionWindow];
-}
-
-- (void)clearCrashFlag
-{
-    firefoxCrashedRecently = NO;
-}
-
-- (BOOL)isRecentCrash
-{
-    if (!lastCrashTime) return NO;
-    return [[NSDate date] timeIntervalSinceDate:lastCrashTime] < kCrashDetectionWindow;
 }
 
 #pragma mark - GWorkspace Integration Methods
@@ -899,27 +931,25 @@ static NSString * const kLastShutdownTime = @"LastShutdownTime";
         
         // Wait for graceful quit, then force if necessary
         if ([self waitForFirefoxToQuit:5.0]) {
-            [NSApp terminate:self];
+            [self initiateWrapperTermination];
         } else {
             // Force termination
-            NSArray *remainingPIDs = [self getAllFirefoxProcessIDs];
-            for (NSNumber *pidNumber in remainingPIDs) {
+            for (NSNumber *pidNumber in firefoxPIDs) {
                 pid_t pid = [pidNumber intValue];
                 kill(pid, SIGTERM);
             }
             
             if (![self waitForFirefoxToQuit:2.0]) {
-                remainingPIDs = [self getAllFirefoxProcessIDs];
-                for (NSNumber *pidNumber in remainingPIDs) {
+                for (NSNumber *pidNumber in firefoxPIDs) {
                     pid_t pid = [pidNumber intValue];
                     kill(pid, SIGKILL);
                 }
             }
             
-            [self scheduleFirefoxTerminationCheck];
+            [self initiateWrapperTermination];
         }
     } else {
-        [NSApp terminate:self];
+        [self initiateWrapperTermination];
     }
 }
 
@@ -953,32 +983,7 @@ static NSString * const kLastShutdownTime = @"LastShutdownTime";
 - (void)openFileInFirefox:(NSString *)filename activate:(BOOL)shouldActivate
 {
     if (![self isFirefoxCurrentlyRunning]) {
-        firefoxTask = [[NSTask alloc] init];
-        [firefoxTask setLaunchPath:firefoxExecutablePath];
-        [firefoxTask setArguments:@[filename]];
-        
-        NSMutableDictionary *environment = [[[NSProcessInfo processInfo] environment] mutableCopy];
-        [firefoxTask setEnvironment:environment];
-        [environment release];
-        
-        [[NSNotificationCenter defaultCenter] 
-            addObserver:self 
-            selector:@selector(handleFirefoxTermination:) 
-            name:NSTaskDidTerminateNotification 
-            object:firefoxTask];
-        
-        NS_DURING
-            [firefoxTask launch];
-            isFirefoxRunning = YES;
-            
-            if (shouldActivate) {
-                [self performSelector:@selector(waitForFirefoxToStart) withObject:nil afterDelay:0.5];
-            }
-        NS_HANDLER
-            [firefoxTask release];
-            firefoxTask = nil;
-        NS_ENDHANDLER
-        
+        [self launchFirefoxWithArgs:@[filename]];
     } else {
         NSTask *openTask = [[NSTask alloc] init];
         [openTask setLaunchPath:firefoxExecutablePath];
@@ -1048,26 +1053,33 @@ static NSString * const kLastShutdownTime = @"LastShutdownTime";
     }
 }
 
-#pragma mark - Memory Management
+#pragma mark - Utility Methods
 
 - (void)handleInitialFirefoxState
 {
     if ([self isFirefoxCurrentlyRunning]) {
+        NSLog(@"Firefox already running at startup");
         [self activateFirefoxWindows];
     } else {
+        NSLog(@"Launching Firefox at startup");
         [self launchFirefox];
     }
 }
 
-- (void)delayedTerminateAfterNotifications
+// Add a test method to manually trigger termination check
+- (void)testTermination
 {
-    [self stopFirefoxMonitoring];
-    [NSApp terminate:self];
-}
-
-- (void)delayedTerminate
-{
-    [NSApp terminate:self];
+    NSLog(@"=== MANUAL TERMINATION TEST ===");
+    NSLog(@"Current terminationInProgress: %d", terminationInProgress);
+    NSLog(@"Current firefoxPID: %d", firefoxPID);
+    NSLog(@"Current Firefox running check: %d", [self isFirefoxCurrentlyRunning]);
+    
+    if (![self isFirefoxCurrentlyRunning]) {
+        NSLog(@"No Firefox processes found - should terminate");
+        [self firefoxProcessExited:0];
+    } else {
+        NSLog(@"Firefox processes still found");
+    }
 }
 
 - (BOOL)waitForFirefoxToQuit:(NSTimeInterval)timeout
@@ -1084,20 +1096,6 @@ static NSString * const kLastShutdownTime = @"LastShutdownTime";
     return NO;
 }
 
-- (void)scheduleFirefoxTerminationCheck
-{
-    [self performSelector:@selector(finalTerminationCheck) withObject:nil afterDelay:1.0];
-}
-
-- (void)finalTerminationCheck
-{
-    if (![self isFirefoxCurrentlyRunning]) {
-        [NSApp terminate:self];
-    } else {
-        [self performSelector:@selector(finalTerminationCheck) withObject:nil afterDelay:1.0];
-    }
-}
-
 - (void)waitForFirefoxToStart
 {
     NSArray *firefoxWindowIDs = [self getFirefoxWindowIDs];
@@ -1109,78 +1107,16 @@ static NSString * const kLastShutdownTime = @"LastShutdownTime";
     }
 }
 
-- (void)handleFirefoxTermination:(NSNotification *)notification
-{
-    NSTask *task = [notification object];
-    
-    if (task == firefoxTask) {
-        [self postFirefoxTerminationNotification];
-        
-        [[NSNotificationCenter defaultCenter] removeObserver:self 
-                                                        name:NSTaskDidTerminateNotification 
-                                                      object:firefoxTask];
-        [firefoxTask release];
-        firefoxTask = nil;
-        isFirefoxRunning = NO;
-    }
-}
-
-#pragma mark - Missing Method Implementations
-
-- (void)checkForRemainingFirefoxProcesses
-{
-    if ([self isFirefoxCurrentlyRunning]) {
-        [self performSelector:@selector(checkForRemainingFirefoxProcesses) 
-                   withObject:nil 
-                   afterDelay:0.5];
-    } else {
-        [NSApp terminate:self];
-    }
-}
-
-- (BOOL)registerServiceWithRetry
-{
-    // Implementation of service registration with retry logic
-    return [self establishServiceConnection];
-}
-
-- (void)handleDisplayReconfiguration
-{
-    // Handle display configuration changes
-    [self invalidateWindowListCache];
-    [self performSelector:@selector(ensureDockIconVisible) withObject:nil afterDelay:0.5];
-}
-
-- (void)scheduleDelayedCleanup
-{
-    // Schedule cleanup operations
-    [self performSelector:@selector(cleanupAfterFirefoxCrash) withObject:nil afterDelay:2.0];
-}
-
-- (void)adjustTimersForSystemLoad
-{
-    // Adjust timer intervals based on system load
-    // For GNUstep, we'll use simple load detection
-    [self optimizeMonitoringInterval];
-}
-
-- (void)scheduleOperation:(SEL)selector withDelay:(NSTimeInterval)delay
-{
-    // Generic method to schedule operations with delay
-    [self performSelector:selector withObject:nil afterDelay:delay];
-}
+#pragma mark - Memory Management
 
 - (void)dealloc
 {
-    [self stopFirefoxMonitoring];
+    [self stopEventDrivenMonitoring];
     [self invalidateServiceConnection];
     
     [firefoxExecutablePath release];
-    [lastStateChangeTime release];
-    [persistentState release];
     [cachedWindowList release];
     [lastWindowListUpdate release];
-    [lastCrashTime release];
     
     if (firefoxTask) {
         [[NSNotificationCenter defaultCenter] removeObserver:self 
@@ -1188,6 +1124,12 @@ static NSString * const kLastShutdownTime = @"LastShutdownTime";
                                                       object:firefoxTask];
         [firefoxTask release];
     }
+    
+#if HAS_LIBDISPATCH
+    if (monitorQueue) {
+        dispatch_release(monitorQueue);
+    }
+#endif
     
     [super dealloc];
 }

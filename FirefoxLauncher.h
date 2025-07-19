@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
+#import <sys/event.h>
 
 // FreeBSD libdispatch support (if available)
 #ifdef __has_include
@@ -14,7 +15,7 @@
   #define HAS_LIBDISPATCH 0
 #endif
 
-// Protocol declaration for distributed objects performance
+// Protocol declaration for distributed objects
 @protocol FirefoxLauncherProtocol
 - (void)activateIgnoringOtherApps:(BOOL)flag;
 - (void)hide:(id)sender;
@@ -25,9 +26,6 @@
 - (NSNumber *)processIdentifier;
 - (BOOL)application:(NSApplication *)sender openFile:(NSString *)filename;
 - (BOOL)application:(NSApplication *)sender openFileWithoutUI:(NSString *)filename;
-#pragma mark - Helper Methods
-- (void)completeTransformationProcess;
-
 @end
 
 @interface FirefoxLauncher : NSObject <FirefoxLauncherProtocol>
@@ -36,36 +34,36 @@
     BOOL isFirefoxRunning;
     NSTask *firefoxTask;
     NSConnection *serviceConnection;
-    NSTimer *monitoringTimer;
-    NSTimer *retryTimer;
-    BOOL shouldTerminateWhenFirefoxQuits;
     
-    // Enhanced monitoring state variables
-    BOOL wasFirefoxRunning;
-    BOOL isFirstMonitoringRun;
-    int stableStateCount;
-    NSDate *lastStateChangeTime;
+    // Event-driven monitoring (no PID tracking needed)
+    pid_t firefoxPID;
+    BOOL terminationInProgress;
     
-    // Connection and retry management
+#if HAS_LIBDISPATCH
+    // GCD process monitoring
+    dispatch_source_t procMonitorSource;
+    dispatch_queue_t monitorQueue;
+#endif
+    
+    // kqueue for child process tracking
+    int kqueueFD;
+    NSThread *kqueueThread;
+    
+    // Connection and state management
     BOOL connectionEstablished;
-    int connectionRetryCount;
-    NSMutableDictionary *persistentState;
+    BOOL isPrimaryInstance;
     
     // Dynamic dock management (FreeBSD/GNUstep compatible)
     BOOL dockIconVisible;
     BOOL isTransformingProcess;
-    NSTimer *dockStateVerificationTimer;
     
-    // Performance optimization
+    // Window management with caching
     NSMutableArray *cachedWindowList;
     NSDate *lastWindowListUpdate;
     NSTimeInterval windowListCacheTimeout;
     
-    // Edge case handling
-    BOOL terminationPending;
+    // System event handling
     BOOL systemSleepDetected;
-    BOOL firefoxCrashedRecently;
-    NSDate *lastCrashTime;
 }
 
 #pragma mark - Application Lifecycle
@@ -75,35 +73,45 @@
 - (void)applicationWillTerminate:(NSNotification *)notification;
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender;
 
+#pragma mark - Single Instance Management
+- (BOOL)establishSingleInstance;
+- (void)delegateToExistingInstance;
+
 #pragma mark - Firefox Process Management
 - (void)launchFirefox;
+- (void)launchFirefoxWithArgs:(NSArray *)arguments;
 - (BOOL)isFirefoxCurrentlyRunning;
 - (void)activateFirefoxWindows;
 - (void)handleFirefoxTermination:(NSNotification *)notification;
-- (void)checkForRemainingFirefoxProcesses;
 - (NSArray *)getAllFirefoxProcessIDs;
 - (NSString *)getExecutablePathForPID:(pid_t)pid;
 
-#pragma mark - Enhanced Monitoring System
-- (void)startSmartFirefoxMonitoring;
-- (void)stopFirefoxMonitoring;
-- (void)smartFirefoxCheck:(NSTimer *)timer;
-- (BOOL)waitForFirefoxToQuit:(NSTimeInterval)timeout;
-- (void)scheduleFirefoxTerminationCheck;
-- (void)finalTerminationCheck;
+#pragma mark - Event-Driven Monitoring System
+- (void)startEventDrivenMonitoring:(pid_t)firefoxProcessID;
+- (void)stopEventDrivenMonitoring;
+- (void)firefoxProcessExited:(int)exitStatus;
+- (void)initiateWrapperTermination;
 
-#pragma mark - Dynamic Dock Management (GNUstep/X11)
+#if HAS_LIBDISPATCH
+#pragma mark - GCD Process Monitoring
+- (void)setupGCDProcessMonitoring:(pid_t)pid;
+- (void)cleanupGCDMonitoring;
+#endif
+
+#pragma mark - kqueue Child Process Tracking
+- (void)setupKqueueChildTracking:(pid_t)parentPID;
+- (void)kqueueMonitoringThread:(id)arg;
+- (void)stopKqueueMonitoring;
+
+#pragma mark - Dynamic Dock Management
 - (void)ensureDockIconVisible;
 - (void)ensureDockIconHidden;
 - (BOOL)isDockIconCurrentlyVisible;
 - (void)updateDockIconState:(BOOL)visible;
-- (void)verifyDockState:(NSTimer *)timer;
-- (void)retryDockOperation:(NSTimer *)timer;
+- (void)completeTransformationProcess;
 
-#pragma mark - Connection Management with Retry Logic
+#pragma mark - Connection Management
 - (BOOL)establishServiceConnection;
-- (void)retryServiceConnection:(NSTimer *)timer;
-- (BOOL)registerServiceWithRetry;
 - (void)invalidateServiceConnection;
 
 #pragma mark - Window Management with Caching
@@ -113,29 +121,10 @@
 - (NSArray *)getFirefoxWindowIDs;
 - (void)waitForFirefoxToStart;
 
-#pragma mark - State Persistence
-- (void)loadPersistentState;
-- (void)savePersistentState;
-- (void)updateStateValue:(id)value forKey:(NSString *)key;
-- (id)getStateValueForKey:(NSString *)key;
-
 #pragma mark - System Event Handling
 - (void)registerForSystemEvents;
 - (void)handleSystemSleep:(NSNotification *)notification;
 - (void)handleSystemWake:(NSNotification *)notification;
-- (void)handleDisplayReconfiguration;
-
-#pragma mark - Edge Case Handling
-- (void)detectFirefoxCrash;
-- (void)handleFirefoxCrash;
-- (void)cleanupAfterFirefoxCrash;
-- (BOOL)isRecentCrash;
-- (void)scheduleDelayedCleanup;
-
-#pragma mark - Performance Optimization
-- (void)optimizeMonitoringInterval;
-- (void)adjustTimersForSystemLoad;
-- (BOOL)shouldUseAggressiveMonitoring;
 
 #pragma mark - GWorkspace Integration Methods
 - (void)activateIgnoringOtherApps:(BOOL)flag;
@@ -156,9 +145,9 @@
 - (void)postFirefoxTerminationNotification;
 - (void)notifyGWorkspaceOfStateChange;
 
-#pragma mark - Delayed Operations
+#pragma mark - Utility Methods
 - (void)handleInitialFirefoxState;
-- (void)delayedTerminate;
-- (void)delayedTerminateAfterNotifications;
+- (BOOL)waitForFirefoxToQuit:(NSTimeInterval)timeout;
+- (void)emergencyExit;
 
 @end
