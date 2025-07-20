@@ -1,17 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
 #import <sys/event.h>
-
-#ifdef __has_include
-  #if __has_include(<dispatch/dispatch.h>)
-    #import <dispatch/dispatch.h>
-    #define HAS_LIBDISPATCH 1
-  #else
-    #define HAS_LIBDISPATCH 0
-  #endif
-#else
-  #define HAS_LIBDISPATCH 0
-#endif
+#import <dispatch/dispatch.h>
 
 @protocol FirefoxLauncherProtocol
 - (void)activateIgnoringOtherApps:(BOOL)flag;
@@ -28,17 +18,13 @@
 @interface FirefoxLauncher : NSObject <FirefoxLauncherProtocol>
 {
     NSString *firefoxExecutablePath;
-    BOOL isFirefoxRunning;
     NSTask *firefoxTask;
-    NSConnection *serviceConnection;
     
     pid_t firefoxPID;
     BOOL terminationInProgress;
     
-#if HAS_LIBDISPATCH
     dispatch_source_t procMonitorSource;
     dispatch_queue_t monitorQueue;
-#endif
     
     int kqueueFD;
     NSThread *kqueueThread;
@@ -51,7 +37,6 @@
     
     NSMutableArray *cachedWindowList;
     NSDate *lastWindowListUpdate;
-    NSTimeInterval windowListCacheTimeout;
     
     BOOL systemSleepDetected;
 }
@@ -78,18 +63,14 @@
 - (void)firefoxProcessExited:(int)exitStatus;
 - (void)initiateWrapperTermination;
 
-#if HAS_LIBDISPATCH
 - (void)setupGCDProcessMonitoring:(pid_t)pid;
 - (void)cleanupGCDMonitoring;
-#endif
 
 - (void)setupKqueueChildTracking:(pid_t)parentPID;
 - (void)kqueueMonitoringThread:(id)arg;
 - (void)stopKqueueMonitoring;
 
 - (void)ensureDockIconVisible;
-- (void)ensureDockIconHidden;
-- (BOOL)isDockIconCurrentlyVisible;
 - (void)updateDockIconState:(BOOL)visible;
 - (void)completeTransformationProcess;
 
