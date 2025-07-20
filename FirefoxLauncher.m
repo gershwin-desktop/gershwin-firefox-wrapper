@@ -7,10 +7,6 @@
 #import <unistd.h>
 #import <errno.h>
 
-#ifndef HAS_LIBDISPATCH
-#define HAS_LIBDISPATCH 0
-#endif
-
 static const NSTimeInterval kWindowListCacheTimeout = 1.0;
 
 @implementation FirefoxLauncher
@@ -20,17 +16,13 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     self = [super init];
     if (self) {
         firefoxExecutablePath = [@"/usr/local/bin/firefox" retain];
-        isFirefoxRunning = NO;
         firefoxTask = nil;
-        serviceConnection = nil;
         
         firefoxPID = 0;
         terminationInProgress = NO;
         
-#if HAS_LIBDISPATCH
         procMonitorSource = NULL;
         monitorQueue = dispatch_queue_create("firefox.monitor", DISPATCH_QUEUE_SERIAL);
-#endif
         
         kqueueFD = -1;
         kqueueThread = nil;
@@ -43,7 +35,6 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
         
         cachedWindowList = [[NSMutableArray alloc] init];
         lastWindowListUpdate = nil;
-        windowListCacheTimeout = kWindowListCacheTimeout;
         
         systemSleepDetected = NO;
         
@@ -193,7 +184,6 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     
     NS_DURING
         [firefoxTask launch];
-        isFirefoxRunning = YES;
         firefoxPID = [firefoxTask processIdentifier];
         
         [self startEventDrivenMonitoring:firefoxPID];
@@ -201,7 +191,6 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
         [self performSelector:@selector(waitForFirefoxToStart) withObject:nil afterDelay:0.5];
         
     NS_HANDLER
-        isFirefoxRunning = NO;
         firefoxPID = 0;
         
         [[NSNotificationCenter defaultCenter] removeObserver:self 
@@ -298,9 +287,7 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     
     [self setupKqueueChildTracking:firefoxPID];
     
-#if HAS_LIBDISPATCH
     [self setupGCDProcessMonitoring:firefoxPID];
-#endif
     
     [self performSelector:@selector(checkFirefoxStatus) withObject:nil afterDelay:2.0];
 }
@@ -309,9 +296,7 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
 {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(checkFirefoxStatus) object:nil];
     
-#if HAS_LIBDISPATCH
     [self cleanupGCDMonitoring];
-#endif
     
     [self stopKqueueMonitoring];
 }
@@ -338,12 +323,6 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
 - (void)checkFirefoxStatus
 {
     if (terminationInProgress) return;
-    
-    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/tmp/test-firefox-wrapper-termination"]) {
-        [[NSFileManager defaultManager] removeItemAtPath:@"/tmp/test-firefox-wrapper-termination" error:nil];
-        [self testTermination];
-        return;
-    }
     
     if (firefoxPID > 0) {
         if (kill(firefoxPID, 0) == -1 && errno == ESRCH) {
@@ -388,7 +367,6 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     exit(0);
 }
 
-#if HAS_LIBDISPATCH
 - (void)setupGCDProcessMonitoring:(pid_t)pid
 {
     if (procMonitorSource) {
@@ -425,7 +403,6 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
         procMonitorSource = NULL;
     }
 }
-#endif
 
 - (void)setupKqueueChildTracking:(pid_t)parentPID
 {
@@ -503,7 +480,6 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
                                                       object:firefoxTask];
         [firefoxTask release];
         firefoxTask = nil;
-        isFirefoxRunning = NO;
         firefoxPID = 0;
         
         [self firefoxProcessExited:exitStatus];
@@ -519,33 +495,10 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     isTransformingProcess = YES;
     [self updateDockIconState:YES];
     
-#if HAS_LIBDISPATCH
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.1 * NSEC_PER_SEC), 
                    dispatch_get_main_queue(), ^{
         [self completeTransformationProcess];
     });
-#else
-    [self performSelector:@selector(completeTransformationProcess) withObject:nil afterDelay:0.1];
-#endif
-}
-
-- (void)ensureDockIconHidden
-{
-    if (!dockIconVisible || isTransformingProcess) {
-        return;
-    }
-    
-    isTransformingProcess = YES;
-    [self updateDockIconState:NO];
-    
-#if HAS_LIBDISPATCH
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.1 * NSEC_PER_SEC), 
-                   dispatch_get_main_queue(), ^{
-        [self completeTransformationProcess];
-    });
-#else
-    [self performSelector:@selector(completeTransformationProcess) withObject:nil afterDelay:0.1];
-#endif
 }
 
 - (void)updateDockIconState:(BOOL)visible
@@ -564,11 +517,6 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     isTransformingProcess = NO;
 }
 
-- (BOOL)isDockIconCurrentlyVisible
-{
-    return dockIconVisible && ![NSApp isHidden];
-}
-
 - (BOOL)establishServiceConnection
 {
     if (connectionEstablished) {
@@ -581,12 +529,7 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
 
 - (void)invalidateServiceConnection
 {
-    if (serviceConnection) {
-        [serviceConnection invalidate];
-        [serviceConnection release];
-        serviceConnection = nil;
-        connectionEstablished = NO;
-    }
+    connectionEstablished = NO;
 }
 
 - (NSArray *)getCachedWindowList
@@ -594,7 +537,7 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     NSDate *now = [NSDate date];
     
     if (lastWindowListUpdate && 
-        [now timeIntervalSinceDate:lastWindowListUpdate] < windowListCacheTimeout &&
+        [now timeIntervalSinceDate:lastWindowListUpdate] < kWindowListCacheTimeout &&
         [cachedWindowList count] > 0) {
         return cachedWindowList;
     }
@@ -724,14 +667,10 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
         [self startEventDrivenMonitoring:firefoxPID];
     }
     
-#if HAS_LIBDISPATCH
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.0 * NSEC_PER_SEC), 
                    dispatch_get_main_queue(), ^{
         [self ensureDockIconVisible];
     });
-#else
-    [self performSelector:@selector(ensureDockIconVisible) withObject:nil afterDelay:1.0];
-#endif
 }
 
 - (void)activateIgnoringOtherApps:(BOOL)flag
@@ -942,13 +881,6 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     }
 }
 
-- (void)testTermination
-{
-    if (![self isFirefoxCurrentlyRunning]) {
-        [self firefoxProcessExited:0];
-    }
-}
-
 - (BOOL)waitForFirefoxToQuit:(NSTimeInterval)timeout
 {
     NSDate *startTime = [NSDate date];
@@ -990,11 +922,9 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
         [firefoxTask release];
     }
     
-#if HAS_LIBDISPATCH
     if (monitorQueue) {
         dispatch_release(monitorQueue);
     }
-#endif
     
     [super dealloc];
 }

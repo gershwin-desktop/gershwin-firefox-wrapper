@@ -64,9 +64,4 @@ uninstall::
 debug: all
 	@./Firefox.app/Firefox
 
-test-performance: all
-	@./Firefox.app/Firefox &
-	@sleep 2
-	@pkill -f "Firefox.app/Firefox"
-
-.PHONY: install uninstall debug test-performance
+.PHONY: install uninstall debug
