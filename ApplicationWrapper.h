@@ -44,12 +44,16 @@
     NSString *serviceName;
     NSString *windowSearchString;
     NSString *bundleIdentifier;
+    
+    NSMutableSet *trackedPIDs;
+    pid_t primaryLaunchedPID;
 }
 
 @property (nonatomic, retain) NSString *applicationName;
 @property (nonatomic, retain) NSString *serviceName;
 @property (nonatomic, retain) NSString *windowSearchString;
 @property (nonatomic, retain) NSString *bundleIdentifier;
+@property (nonatomic, retain) NSMutableSet *trackedPIDs;
 
 - (id)initWithConfiguration:(NSDictionary *)config;
 
@@ -67,8 +71,11 @@
 - (BOOL)isApplicationCurrentlyRunning;
 - (void)activateApplicationWindows;
 - (void)handleApplicationTermination:(NSNotification *)notification;
-- (NSArray *)getAllApplicationProcessIDs;
-- (NSString *)getExecutablePathForPID:(pid_t)pid;
+- (NSArray *)getChildProcesses:(pid_t)parentPID;
+- (void)trackPID:(pid_t)pid;
+- (void)untrackPID:(pid_t)pid;
+- (void)discoverChildProcesses;
+- (void)checkApplicationStatus;
 
 - (void)startEventDrivenMonitoring:(pid_t)applicationProcessID;
 - (void)stopEventDrivenMonitoring;
