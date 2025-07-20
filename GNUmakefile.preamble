@@ -1,0 +1,8 @@
+APP_NAME = Firefox
+EXECUTABLE_NAME = firefox
+EXECUTABLE_PATH = /usr/local/bin/firefox
+SERVICE_NAME = Firefox
+WINDOW_SEARCH_STRING = Firefox
+BUNDLE_ID = org.gnustep.firefox-wrapper
+ICON_FILE = Firefox.png
+VERSION = 3.0.0
