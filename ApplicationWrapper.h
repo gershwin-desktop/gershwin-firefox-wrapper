@@ -3,7 +3,7 @@
 #import <sys/event.h>
 #import <dispatch/dispatch.h>
 
-@protocol FirefoxLauncherProtocol
+@protocol ApplicationWrapperProtocol
 - (void)activateIgnoringOtherApps:(BOOL)flag;
 - (void)hide:(id)sender;
 - (void)unhideWithoutActivation;
@@ -15,12 +15,12 @@
 - (BOOL)application:(NSApplication *)sender openFileWithoutUI:(NSString *)filename;
 @end
 
-@interface FirefoxLauncher : NSObject <FirefoxLauncherProtocol>
+@interface ApplicationWrapper : NSObject <ApplicationWrapperProtocol>
 {
-    NSString *firefoxExecutablePath;
-    NSTask *firefoxTask;
+    NSString *applicationExecutablePath;
+    NSTask *applicationTask;
     
-    pid_t firefoxPID;
+    pid_t applicationPID;
     BOOL terminationInProgress;
     
     dispatch_source_t procMonitorSource;
@@ -39,7 +39,19 @@
     NSDate *lastWindowListUpdate;
     
     BOOL systemSleepDetected;
+    
+    NSString *applicationName;
+    NSString *serviceName;
+    NSString *windowSearchString;
+    NSString *bundleIdentifier;
 }
+
+@property (nonatomic, retain) NSString *applicationName;
+@property (nonatomic, retain) NSString *serviceName;
+@property (nonatomic, retain) NSString *windowSearchString;
+@property (nonatomic, retain) NSString *bundleIdentifier;
+
+- (id)initWithConfiguration:(NSDictionary *)config;
 
 - (void)applicationWillFinishLaunching:(NSNotification *)notification;
 - (void)applicationDidFinishLaunching:(NSNotification *)notification;
@@ -50,17 +62,17 @@
 - (BOOL)establishSingleInstance;
 - (void)delegateToExistingInstance;
 
-- (void)launchFirefox;
-- (void)launchFirefoxWithArgs:(NSArray *)arguments;
-- (BOOL)isFirefoxCurrentlyRunning;
-- (void)activateFirefoxWindows;
-- (void)handleFirefoxTermination:(NSNotification *)notification;
-- (NSArray *)getAllFirefoxProcessIDs;
+- (void)launchApplication;
+- (void)launchApplicationWithArgs:(NSArray *)arguments;
+- (BOOL)isApplicationCurrentlyRunning;
+- (void)activateApplicationWindows;
+- (void)handleApplicationTermination:(NSNotification *)notification;
+- (NSArray *)getAllApplicationProcessIDs;
 - (NSString *)getExecutablePathForPID:(pid_t)pid;
 
-- (void)startEventDrivenMonitoring:(pid_t)firefoxProcessID;
+- (void)startEventDrivenMonitoring:(pid_t)applicationProcessID;
 - (void)stopEventDrivenMonitoring;
-- (void)firefoxProcessExited:(int)exitStatus;
+- (void)applicationProcessExited:(int)exitStatus;
 - (void)initiateWrapperTermination;
 
 - (void)setupGCDProcessMonitoring:(pid_t)pid;
@@ -77,11 +89,11 @@
 - (BOOL)establishServiceConnection;
 - (void)invalidateServiceConnection;
 
-- (BOOL)activateFirefoxWithWmctrl;
+- (BOOL)activateApplicationWithWmctrl;
 - (NSArray *)getCachedWindowList;
 - (void)invalidateWindowListCache;
-- (NSArray *)getFirefoxWindowIDs;
-- (void)waitForFirefoxToStart;
+- (NSArray *)getApplicationWindowIDs;
+- (void)waitForApplicationToStart;
 
 - (void)registerForSystemEvents;
 - (void)handleSystemSleep:(NSNotification *)notification;
@@ -97,14 +109,14 @@
 
 - (BOOL)application:(NSApplication *)sender openFile:(NSString *)filename;
 - (BOOL)application:(NSApplication *)sender openFileWithoutUI:(NSString *)filename;
-- (void)openFileInFirefox:(NSString *)filename activate:(BOOL)shouldActivate;
+- (void)openFileInApplication:(NSString *)filename activate:(BOOL)shouldActivate;
 
-- (void)postFirefoxLaunchNotification;
-- (void)postFirefoxTerminationNotification;
+- (void)postApplicationLaunchNotification;
+- (void)postApplicationTerminationNotification;
 - (void)notifyGWorkspaceOfStateChange;
 
-- (void)handleInitialFirefoxState;
-- (BOOL)waitForFirefoxToQuit:(NSTimeInterval)timeout;
+- (void)handleInitialApplicationState;
+- (BOOL)waitForApplicationToQuit:(NSTimeInterval)timeout;
 - (void)emergencyExit;
 
 @end

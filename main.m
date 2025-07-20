@@ -3,7 +3,7 @@
 #import <unistd.h>
 #import <stdlib.h>
 #import <signal.h>
-#import "FirefoxLauncher.h"
+#import "ApplicationWrapper.h"
 
 void signalHandler(int sig)
 {
@@ -11,17 +11,17 @@ void signalHandler(int sig)
     exit(0);
 }
 
-@interface FirefoxLauncher (InstanceDetection)
+@interface ApplicationWrapper (InstanceDetection)
 + (BOOL)checkForExistingInstance;
 @end
 
-@implementation FirefoxLauncher (InstanceDetection)
+@implementation ApplicationWrapper (InstanceDetection)
 
 + (BOOL)checkForExistingInstance
 {
-    NSConnection *existingConnection = [NSConnection connectionWithRegisteredName:@"Firefox" host:nil];
+    NSConnection *existingConnection = [NSConnection connectionWithRegisteredName:@SERVICE_NAME host:nil];
     if (existingConnection) {
-        id<FirefoxLauncherProtocol> existingLauncher = (id<FirefoxLauncherProtocol>)[existingConnection rootProxy];
+        id<ApplicationWrapperProtocol> existingLauncher = (id<ApplicationWrapperProtocol>)[existingConnection rootProxy];
         if (existingLauncher) {
             NS_DURING
                 BOOL isRunning = [existingLauncher isRunning];
@@ -50,7 +50,7 @@ int main(int argc, const char *argv[])
     
     NSApplication *app = [NSApplication sharedApplication];
     
-    if ([FirefoxLauncher checkForExistingInstance]) {
+    if ([ApplicationWrapper checkForExistingInstance]) {
         [pool release];
         return 0;
     }
@@ -60,7 +60,7 @@ int main(int argc, const char *argv[])
         [launchArgs addObject:[NSString stringWithUTF8String:argv[i]]];
     }
     
-    FirefoxLauncher *launcher = [[FirefoxLauncher alloc] init];
+    ApplicationWrapper *launcher = [[ApplicationWrapper alloc] init];
     [app setDelegate:launcher];
     
     if ([launchArgs count] > 0) {

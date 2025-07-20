@@ -1,64 +1,74 @@
 include $(GNUSTEP_MAKEFILES)/common.make
 
-APP_NAME = Firefox
+APP_NAME ?= Firefox
+EXECUTABLE_NAME ?= firefox
+EXECUTABLE_PATH ?= /usr/local/bin/firefox
+SERVICE_NAME ?= Firefox
+WINDOW_SEARCH_STRING ?= Firefox
+BUNDLE_ID ?= org.gnustep.firefox-wrapper
+ICON_FILE ?= Firefox.png
+VERSION ?= 3.0.0
 
-Firefox_OBJC_FILES = \
+$(APP_NAME)_OBJC_FILES = \
 	main.m \
-	FirefoxLauncher.m
+	ApplicationWrapper.m
 
-Firefox_LDFLAGS += -L/usr/local/lib
-Firefox_CPPFLAGS += -I/usr/local/include
-Firefox_LDFLAGS += -ldispatch
-Firefox_OBJCFLAGS += -Wall -Wextra -O2 -fno-strict-aliasing
+$(APP_NAME)_LDFLAGS += -L/usr/local/lib
+$(APP_NAME)_CPPFLAGS += -I/usr/local/include
+$(APP_NAME)_LDFLAGS += -ldispatch
+$(APP_NAME)_OBJCFLAGS += -Wall -Wextra -O2 -fno-strict-aliasing
 
-FIREFOX_WRAPPER_VERSION = 3.0.0
-Firefox_OBJCFLAGS += -DFIREFOX_WRAPPER_VERSION=\"$(FIREFOX_WRAPPER_VERSION)\"
+$(APP_NAME)_OBJCFLAGS += -DAPPLICATION_NAME=\"$(APP_NAME)\"
+$(APP_NAME)_OBJCFLAGS += -DEXECUTABLE_PATH=\"$(EXECUTABLE_PATH)\"
+$(APP_NAME)_OBJCFLAGS += -DSERVICE_NAME=\"$(SERVICE_NAME)\"
+$(APP_NAME)_OBJCFLAGS += -DWINDOW_SEARCH_STRING=\"$(WINDOW_SEARCH_STRING)\"
+$(APP_NAME)_OBJCFLAGS += -DBUNDLE_IDENTIFIER=\"$(BUNDLE_ID)\"
 
 include $(GNUSTEP_MAKEFILES)/application.make
 
 after-all::
-	@echo '{' > Firefox.app/Resources/Info-gnustep.plist
-	@echo '    ApplicationName = "Firefox";' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '    ApplicationDescription = "Event-Driven Firefox Web Browser Wrapper";' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '    ApplicationRelease = "$(FIREFOX_WRAPPER_VERSION)";' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '    NSExecutable = "Firefox";' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '    CFBundleIconFile = "Firefox.png";' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '    NSPrincipalClass = "NSApplication";' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '    LSUIElement = "NO";' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '    NSUseRunningCopy = "NO";' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '    NSHighResolutionCapable = "YES";' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '    LSMinimumSystemVersion = "FreeBSD 12.0";' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '    CFBundleVersion = "$(FIREFOX_WRAPPER_VERSION)";' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '    CFBundleShortVersionString = "$(FIREFOX_WRAPPER_VERSION)";' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '    CFBundleIdentifier = "org.gnustep.firefox-wrapper";' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '    NSServices = (' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '        {' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '            NSMenuItem = { default = "Open in Firefox"; };' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '            NSMessage = "openFile";' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '            NSSendTypes = ("NSFilenamesPboardType");' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '        }' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '    );' >> Firefox.app/Resources/Info-gnustep.plist
-	@echo '}' >> Firefox.app/Resources/Info-gnustep.plist
-	@if [ -f Firefox.png ]; then \
-		cp Firefox.png Firefox.app/Resources/; \
+	@echo '{' > $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '    ApplicationName = "$(APP_NAME)";' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '    ApplicationDescription = "Event-Driven $(APP_NAME) Application Wrapper";' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '    ApplicationRelease = "$(VERSION)";' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '    NSExecutable = "$(APP_NAME)";' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '    CFBundleIconFile = "$(ICON_FILE)";' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '    NSPrincipalClass = "NSApplication";' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '    LSUIElement = "NO";' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '    NSUseRunningCopy = "NO";' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '    NSHighResolutionCapable = "YES";' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '    LSMinimumSystemVersion = "FreeBSD 12.0";' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '    CFBundleVersion = "$(VERSION)";' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '    CFBundleShortVersionString = "$(VERSION)";' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '    CFBundleIdentifier = "$(BUNDLE_ID)";' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '    NSServices = (' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '        {' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '            NSMenuItem = { default = "Open in $(APP_NAME)"; };' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '            NSMessage = "openFile";' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '            NSSendTypes = ("NSFilenamesPboardType");' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '        }' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '    );' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@echo '}' >> $(APP_NAME).app/Resources/Info-gnustep.plist
+	@if [ -f $(ICON_FILE) ]; then \
+		cp $(ICON_FILE) $(APP_NAME).app/Resources/; \
 	else \
-		touch Firefox.app/Resources/Firefox.png; \
+		touch $(APP_NAME).app/Resources/$(ICON_FILE); \
 	fi
-	@chmod +x Firefox.app/Firefox
+	@chmod +x $(APP_NAME).app/$(APP_NAME)
 
 clean::
-	@rm -rf Firefox.app
+	@rm -rf $(APP_NAME).app
 
 install::
 	@if [ -d "/Applications" ]; then \
-		cp -r Firefox.app /Applications/; \
+		cp -r $(APP_NAME).app /Applications/; \
 	else \
 		exit 1; \
 	fi
 
 uninstall::
-	@if [ -d "/Applications/Firefox.app" ]; then \
-		rm -rf "/Applications/Firefox.app"; \
+	@if [ -d "/Applications/$(APP_NAME).app" ]; then \
+		rm -rf "/Applications/$(APP_NAME).app"; \
 	fi
 
 .PHONY: install uninstall

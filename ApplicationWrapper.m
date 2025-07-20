@@ -1,4 +1,4 @@
-#import "FirefoxLauncher.h"
+#import "ApplicationWrapper.h"
 #import <sys/types.h>
 #import <sys/sysctl.h>
 #import <sys/user.h>
@@ -9,20 +9,38 @@
 
 static const NSTimeInterval kWindowListCacheTimeout = 1.0;
 
-@implementation FirefoxLauncher
+@implementation ApplicationWrapper
+
+@synthesize applicationName;
+@synthesize serviceName;
+@synthesize windowSearchString;
+@synthesize bundleIdentifier;
 
 - (id)init
 {
+    NSDictionary *defaultConfig = @{
+        @"applicationName": @APPLICATION_NAME,
+        @"executablePath": @EXECUTABLE_PATH,
+        @"serviceName": @SERVICE_NAME,
+        @"windowSearchString": @WINDOW_SEARCH_STRING,
+        @"bundleIdentifier": @BUNDLE_IDENTIFIER
+    };
+    
+    return [self initWithConfiguration:defaultConfig];
+}
+
+- (id)initWithConfiguration:(NSDictionary *)config
+{
     self = [super init];
     if (self) {
-        firefoxExecutablePath = [@"/usr/local/bin/firefox" retain];
-        firefoxTask = nil;
+        applicationExecutablePath = [[config objectForKey:@"executablePath"] retain];
+        applicationTask = nil;
         
-        firefoxPID = 0;
+        applicationPID = 0;
         terminationInProgress = NO;
         
         procMonitorSource = NULL;
-        monitorQueue = dispatch_queue_create("firefox.monitor", DISPATCH_QUEUE_SERIAL);
+        monitorQueue = dispatch_queue_create("application.monitor", DISPATCH_QUEUE_SERIAL);
         
         kqueueFD = -1;
         kqueueThread = nil;
@@ -37,6 +55,11 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
         lastWindowListUpdate = nil;
         
         systemSleepDetected = NO;
+        
+        self.applicationName = [config objectForKey:@"applicationName"];
+        self.serviceName = [config objectForKey:@"serviceName"];
+        self.windowSearchString = [config objectForKey:@"windowSearchString"];
+        self.bundleIdentifier = [config objectForKey:@"bundleIdentifier"];
         
         [self registerForSystemEvents];
     }
@@ -56,9 +79,9 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     
     [self ensureDockIconVisible];
     
-    [self postFirefoxLaunchNotification];
+    [self postApplicationLaunchNotification];
     
-    NSString *iconPath = [[NSBundle mainBundle] pathForResource:@"Firefox" ofType:@"png"];
+    NSString *iconPath = [[NSBundle mainBundle] pathForResource:self.applicationName ofType:@"png"];
     if (iconPath && [[NSFileManager defaultManager] fileExistsAtPath:iconPath]) {
         NSImage *icon = [[NSImage alloc] initWithContentsOfFile:iconPath];
         if (icon) {
@@ -70,15 +93,15 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification
 {
-    [self performSelector:@selector(handleInitialFirefoxState) withObject:nil afterDelay:0.1];
+    [self performSelector:@selector(handleInitialApplicationState) withObject:nil afterDelay:0.1];
 }
 
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)theApplication hasVisibleWindows:(BOOL)flag
 {
-    if ([self isFirefoxCurrentlyRunning]) {
-        [self activateFirefoxWindows];
+    if ([self isApplicationCurrentlyRunning]) {
+        [self activateApplicationWindows];
     } else {
-        [self launchFirefox];
+        [self launchApplication];
     }
     return NO;
 }
@@ -89,7 +112,7 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
         return NSTerminateNow;
     }
     
-    if ([self isFirefoxCurrentlyRunning]) {
+    if ([self isApplicationCurrentlyRunning]) {
         return NSTerminateCancel;
     }
     return NSTerminateNow;
@@ -100,12 +123,12 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     [self stopEventDrivenMonitoring];
     [self invalidateServiceConnection];
     
-    if (firefoxTask) {
+    if (applicationTask) {
         [[NSNotificationCenter defaultCenter] removeObserver:self 
                                                         name:NSTaskDidTerminateNotification 
-                                                      object:firefoxTask];
-        [firefoxTask release];
-        firefoxTask = nil;
+                                                      object:applicationTask];
+        [applicationTask release];
+        applicationTask = nil;
     }
 }
 
@@ -114,19 +137,19 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     NSConnection *connection = [NSConnection defaultConnection];
     [connection setRootObject:self];
     
-    isPrimaryInstance = [connection registerName:@"Firefox"];
+    isPrimaryInstance = [connection registerName:self.serviceName];
     
     if (!isPrimaryInstance) {
-        NSConnection *existingConnection = [NSConnection connectionWithRegisteredName:@"Firefox" host:nil];
+        NSConnection *existingConnection = [NSConnection connectionWithRegisteredName:self.serviceName host:nil];
         if (existingConnection) {
-            id<FirefoxLauncherProtocol> existingLauncher = (id<FirefoxLauncherProtocol>)[existingConnection rootProxy];
+            id<ApplicationWrapperProtocol> existingLauncher = (id<ApplicationWrapperProtocol>)[existingConnection rootProxy];
             if (existingLauncher) {
                 NS_DURING
                     BOOL isRunning = [existingLauncher isRunning];
                     (void)isRunning;
                     return NO;
                 NS_HANDLER
-                    isPrimaryInstance = [connection registerName:@"Firefox"];
+                    isPrimaryInstance = [connection registerName:self.serviceName];
                 NS_ENDHANDLER
             }
         }
@@ -137,9 +160,9 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
 
 - (void)delegateToExistingInstance
 {
-    NSConnection *existingConnection = [NSConnection connectionWithRegisteredName:@"Firefox" host:nil];
+    NSConnection *existingConnection = [NSConnection connectionWithRegisteredName:self.serviceName host:nil];
     if (existingConnection) {
-        id<FirefoxLauncherProtocol> existingLauncher = (id<FirefoxLauncherProtocol>)[existingConnection rootProxy];
+        id<ApplicationWrapperProtocol> existingLauncher = (id<ApplicationWrapperProtocol>)[existingConnection rootProxy];
         if (existingLauncher) {
             NS_DURING
                 [existingLauncher activateIgnoringOtherApps:YES];
@@ -149,59 +172,59 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     }
 }
 
-- (void)launchFirefox
+- (void)launchApplication
 {
-    [self launchFirefoxWithArgs:@[]];
+    [self launchApplicationWithArgs:@[]];
 }
 
-- (void)launchFirefoxWithArgs:(NSArray *)arguments
+- (void)launchApplicationWithArgs:(NSArray *)arguments
 {
-    if ([self isFirefoxCurrentlyRunning]) {
-        [self activateFirefoxWindows];
+    if ([self isApplicationCurrentlyRunning]) {
+        [self activateApplicationWindows];
         return;
     }
     
-    if (firefoxTask && [firefoxTask isRunning]) {
-        [self activateFirefoxWindows];
+    if (applicationTask && [applicationTask isRunning]) {
+        [self activateApplicationWindows];
         return;
     }
     
-    [self postFirefoxLaunchNotification];
+    [self postApplicationLaunchNotification];
     
-    firefoxTask = [[NSTask alloc] init];
-    [firefoxTask setLaunchPath:firefoxExecutablePath];
-    [firefoxTask setArguments:arguments];
+    applicationTask = [[NSTask alloc] init];
+    [applicationTask setLaunchPath:applicationExecutablePath];
+    [applicationTask setArguments:arguments];
     
     NSMutableDictionary *environment = [[[NSProcessInfo processInfo] environment] mutableCopy];
-    [firefoxTask setEnvironment:environment];
+    [applicationTask setEnvironment:environment];
     [environment release];
     
     [[NSNotificationCenter defaultCenter] 
         addObserver:self 
-        selector:@selector(handleFirefoxTermination:) 
+        selector:@selector(handleApplicationTermination:) 
         name:NSTaskDidTerminateNotification 
-        object:firefoxTask];
+        object:applicationTask];
     
     NS_DURING
-        [firefoxTask launch];
-        firefoxPID = [firefoxTask processIdentifier];
+        [applicationTask launch];
+        applicationPID = [applicationTask processIdentifier];
         
-        [self startEventDrivenMonitoring:firefoxPID];
+        [self startEventDrivenMonitoring:applicationPID];
         
-        [self performSelector:@selector(waitForFirefoxToStart) withObject:nil afterDelay:0.5];
+        [self performSelector:@selector(waitForApplicationToStart) withObject:nil afterDelay:0.5];
         
     NS_HANDLER
-        firefoxPID = 0;
+        applicationPID = 0;
         
         [[NSNotificationCenter defaultCenter] removeObserver:self 
                                                         name:NSTaskDidTerminateNotification 
-                                                      object:firefoxTask];
-        [firefoxTask release];
-        firefoxTask = nil;
+                                                      object:applicationTask];
+        [applicationTask release];
+        applicationTask = nil;
         
         NSAlert *alert = [[NSAlert alloc] init];
-        [alert setMessageText:@"Firefox Launch Error"];
-        [alert setInformativeText:[NSString stringWithFormat:@"Could not launch Firefox from %@. Please check that Firefox is installed.", firefoxExecutablePath]];
+        [alert setMessageText:[NSString stringWithFormat:@"%@ Launch Error", self.applicationName]];
+        [alert setInformativeText:[NSString stringWithFormat:@"Could not launch %@ from %@. Please check that %@ is installed.", self.applicationName, applicationExecutablePath, self.applicationName]];
         [alert addButtonWithTitle:@"OK"];
         [alert runModal];
         [alert release];
@@ -210,13 +233,13 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     NS_ENDHANDLER
 }
 
-- (NSArray *)getAllFirefoxProcessIDs
+- (NSArray *)getAllApplicationProcessIDs
 {
     int mib[4];
     size_t size;
     struct kinfo_proc *procs;
     int nprocs;
-    NSMutableArray *firefoxPIDs = [[NSMutableArray alloc] init];
+    NSMutableArray *applicationPIDs = [[NSMutableArray alloc] init];
     
     mib[0] = CTL_KERN;
     mib[1] = KERN_PROC;
@@ -224,35 +247,35 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     mib[3] = 0;
     
     if (sysctl(mib, 4, NULL, &size, NULL, 0) < 0) {
-        return [firefoxPIDs autorelease];
+        return [applicationPIDs autorelease];
     }
     
     procs = malloc(size);
     if (procs == NULL) {
-        return [firefoxPIDs autorelease];
+        return [applicationPIDs autorelease];
     }
     
     if (sysctl(mib, 4, procs, &size, NULL, 0) < 0) {
         free(procs);
-        return [firefoxPIDs autorelease];
+        return [applicationPIDs autorelease];
     }
     
     nprocs = size / sizeof(struct kinfo_proc);
     
     for (int i = 0; i < nprocs; i++) {
         NSString *execPath = [self getExecutablePathForPID:procs[i].ki_pid];
-        if (execPath && [execPath isEqualToString:firefoxExecutablePath]) {
-            [firefoxPIDs addObject:@(procs[i].ki_pid)];
+        if (execPath && [execPath isEqualToString:applicationExecutablePath]) {
+            [applicationPIDs addObject:@(procs[i].ki_pid)];
         }
     }
     
     free(procs);
-    return [firefoxPIDs autorelease];
+    return [applicationPIDs autorelease];
 }
 
-- (BOOL)isFirefoxCurrentlyRunning 
+- (BOOL)isApplicationCurrentlyRunning 
 {
-    NSArray *pids = [self getAllFirefoxProcessIDs];
+    NSArray *pids = [self getAllApplicationProcessIDs];
     return [pids count] > 0;
 }
 
@@ -279,34 +302,34 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     return nil;
 }
 
-- (void)startEventDrivenMonitoring:(pid_t)firefoxProcessID
+- (void)startEventDrivenMonitoring:(pid_t)applicationProcessID
 {
     if (terminationInProgress) return;
     
-    firefoxPID = firefoxProcessID;
+    applicationPID = applicationProcessID;
     
-    [self setupKqueueChildTracking:firefoxPID];
+    [self setupKqueueChildTracking:applicationPID];
     
-    [self setupGCDProcessMonitoring:firefoxPID];
+    [self setupGCDProcessMonitoring:applicationPID];
     
-    [self performSelector:@selector(checkFirefoxStatus) withObject:nil afterDelay:2.0];
+    [self performSelector:@selector(checkApplicationStatus) withObject:nil afterDelay:2.0];
 }
 
 - (void)stopEventDrivenMonitoring
 {
-    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(checkFirefoxStatus) object:nil];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(checkApplicationStatus) object:nil];
     
     [self cleanupGCDMonitoring];
     
     [self stopKqueueMonitoring];
 }
 
-- (void)firefoxProcessExited:(int)exitStatus
+- (void)applicationProcessExited:(int)exitStatus
 {
     if (terminationInProgress) return;
     
-    if (![self isFirefoxCurrentlyRunning]) {
-        [self postFirefoxTerminationNotification];
+    if (![self isApplicationCurrentlyRunning]) {
+        [self postApplicationTerminationNotification];
         
         if ([NSThread isMainThread]) {
             [self initiateWrapperTermination];
@@ -316,29 +339,29 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
             });
         }
     } else {
-        [self performSelector:@selector(checkFirefoxStatus) withObject:nil afterDelay:1.0];
+        [self performSelector:@selector(checkApplicationStatus) withObject:nil afterDelay:1.0];
     }
 }
 
-- (void)checkFirefoxStatus
+- (void)checkApplicationStatus
 {
     if (terminationInProgress) return;
     
-    if (firefoxPID > 0) {
-        if (kill(firefoxPID, 0) == -1 && errno == ESRCH) {
-            [self firefoxProcessExited:0];
+    if (applicationPID > 0) {
+        if (kill(applicationPID, 0) == -1 && errno == ESRCH) {
+            [self applicationProcessExited:0];
             return;
         }
     }
     
-    NSArray *firefoxPIDs = [self getAllFirefoxProcessIDs];
+    NSArray *applicationPIDs = [self getAllApplicationProcessIDs];
     
-    if ([firefoxPIDs count] == 0) {
-        [self firefoxProcessExited:0];
+    if ([applicationPIDs count] == 0) {
+        [self applicationProcessExited:0];
         return;
     }
     
-    [self performSelector:@selector(checkFirefoxStatus) withObject:nil afterDelay:3.0];
+    [self performSelector:@selector(checkApplicationStatus) withObject:nil afterDelay:3.0];
 }
 
 - (void)initiateWrapperTermination
@@ -385,7 +408,7 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
         uint32_t flags = dispatch_source_get_data(procMonitorSource);
         
         if (flags & DISPATCH_PROC_EXIT) {
-            [self firefoxProcessExited:0];
+            [self applicationProcessExited:0];
         }
     });
     
@@ -446,7 +469,7 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
         
         if (nev > 0) {
             if (event.fflags & NOTE_EXIT && (pid_t)event.ident == parentPID) {
-                [self firefoxProcessExited:(int)event.data];
+                [self applicationProcessExited:(int)event.data];
                 break;
             }
         }
@@ -468,21 +491,21 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     }
 }
 
-- (void)handleFirefoxTermination:(NSNotification *)notification
+- (void)handleApplicationTermination:(NSNotification *)notification
 {
     NSTask *task = [notification object];
     
-    if (task == firefoxTask) {
+    if (task == applicationTask) {
         int exitStatus = [task terminationStatus];
         
         [[NSNotificationCenter defaultCenter] removeObserver:self 
                                                         name:NSTaskDidTerminateNotification 
-                                                      object:firefoxTask];
-        [firefoxTask release];
-        firefoxTask = nil;
-        firefoxPID = 0;
+                                                      object:applicationTask];
+        [applicationTask release];
+        applicationTask = nil;
+        applicationPID = 0;
         
-        [self firefoxProcessExited:exitStatus];
+        [self applicationProcessExited:exitStatus];
     }
 }
 
@@ -581,34 +604,34 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     lastWindowListUpdate = nil;
 }
 
-- (NSArray *)getFirefoxWindowIDs
+- (NSArray *)getApplicationWindowIDs
 {
     NSArray *lines = [self getCachedWindowList];
-    NSMutableArray *firefoxWindowIDs = [[NSMutableArray alloc] init];
+    NSMutableArray *applicationWindowIDs = [[NSMutableArray alloc] init];
     
     for (NSString *line in lines) {
         if ([line length] > 0) {
-            NSRange firefoxRange = [line rangeOfString:@"Firefox" options:NSCaseInsensitiveSearch];
+            NSRange appRange = [line rangeOfString:self.windowSearchString options:NSCaseInsensitiveSearch];
             
-            if (firefoxRange.location != NSNotFound) {
+            if (appRange.location != NSNotFound) {
                 NSArray *components = [line componentsSeparatedByString:@" "];
                 if ([components count] > 0) {
                     NSString *windowID = [components objectAtIndex:0];
-                    [firefoxWindowIDs addObject:windowID];
+                    [applicationWindowIDs addObject:windowID];
                 }
             }
         }
     }
     
-    return [firefoxWindowIDs autorelease];
+    return [applicationWindowIDs autorelease];
 }
 
-- (BOOL)activateFirefoxWithWmctrl
+- (BOOL)activateApplicationWithWmctrl
 {
-    NSArray *firefoxWindowIDs = [self getFirefoxWindowIDs];
+    NSArray *applicationWindowIDs = [self getApplicationWindowIDs];
     BOOL success = NO;
     
-    for (NSString *windowID in firefoxWindowIDs) {
+    for (NSString *windowID in applicationWindowIDs) {
         NSTask *activateTask = [[NSTask alloc] init];
         [activateTask setLaunchPath:@"/usr/local/bin/wmctrl"];
         [activateTask setArguments:@[@"-i", @"-a", windowID]];
@@ -631,9 +654,9 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     return success;
 }
 
-- (void)activateFirefoxWindows
+- (void)activateApplicationWindows
 {
-    [self activateFirefoxWithWmctrl];
+    [self activateApplicationWithWmctrl];
 }
 
 - (void)registerForSystemEvents
@@ -662,8 +685,8 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     systemSleepDetected = NO;
     [self invalidateWindowListCache];
     
-    if (firefoxPID > 0) {
-        [self startEventDrivenMonitoring:firefoxPID];
+    if (applicationPID > 0) {
+        [self startEventDrivenMonitoring:applicationPID];
     }
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.0 * NSEC_PER_SEC), 
@@ -674,19 +697,19 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
 
 - (void)activateIgnoringOtherApps:(BOOL)flag
 {
-    if ([self isFirefoxCurrentlyRunning]) {
-        [self activateFirefoxWindows];
+    if ([self isApplicationCurrentlyRunning]) {
+        [self activateApplicationWindows];
         [self notifyGWorkspaceOfStateChange];
     } else {
-        [self launchFirefox];
+        [self launchApplication];
     }
 }
 
 - (void)hide:(id)sender
 {
-    NSArray *firefoxWindowIDs = [self getFirefoxWindowIDs];
+    NSArray *applicationWindowIDs = [self getApplicationWindowIDs];
     
-    for (NSString *windowID in firefoxWindowIDs) {
+    for (NSString *windowID in applicationWindowIDs) {
         NSTask *minimizeTask = [[NSTask alloc] init];
         [minimizeTask setLaunchPath:@"/usr/local/bin/wmctrl"];
         [minimizeTask setArguments:@[@"-i", @"-b", @"add,hidden", windowID]];
@@ -707,9 +730,9 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
 
 - (void)unhideWithoutActivation
 {
-    NSArray *firefoxWindowIDs = [self getFirefoxWindowIDs];
+    NSArray *applicationWindowIDs = [self getApplicationWindowIDs];
     
-    for (NSString *windowID in firefoxWindowIDs) {
+    for (NSString *windowID in applicationWindowIDs) {
         NSTask *unhideTask = [[NSTask alloc] init];
         [unhideTask setLaunchPath:@"/usr/local/bin/wmctrl"];
         [unhideTask setArguments:@[@"-i", @"-b", @"remove,hidden", windowID]];
@@ -730,18 +753,18 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
 
 - (BOOL)isHidden
 {
-    NSArray *firefoxWindowIDs = [self getFirefoxWindowIDs];
-    return [firefoxWindowIDs count] == 0;
+    NSArray *applicationWindowIDs = [self getApplicationWindowIDs];
+    return [applicationWindowIDs count] == 0;
 }
 
 - (void)terminate:(id)sender
 {
-    NSArray *firefoxPIDs = [self getAllFirefoxProcessIDs];
+    NSArray *applicationPIDs = [self getAllApplicationProcessIDs];
     
-    if ([firefoxPIDs count] > 0) {
+    if ([applicationPIDs count] > 0) {
         NSTask *quitTask = [[NSTask alloc] init];
         [quitTask setLaunchPath:@"/usr/local/bin/wmctrl"];
-        [quitTask setArguments:@[@"-c", @"Firefox"]];
+        [quitTask setArguments:@[@"-c", self.windowSearchString]];
         [quitTask setStandardOutput:[NSPipe pipe]];
         [quitTask setStandardError:[NSPipe pipe]];
         
@@ -753,16 +776,16 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
         
         [quitTask release];
         
-        if ([self waitForFirefoxToQuit:5.0]) {
+        if ([self waitForApplicationToQuit:5.0]) {
             [self initiateWrapperTermination];
         } else {
-            for (NSNumber *pidNumber in firefoxPIDs) {
+            for (NSNumber *pidNumber in applicationPIDs) {
                 pid_t pid = [pidNumber intValue];
                 kill(pid, SIGTERM);
             }
             
-            if (![self waitForFirefoxToQuit:2.0]) {
-                for (NSNumber *pidNumber in firefoxPIDs) {
+            if (![self waitForApplicationToQuit:2.0]) {
+                for (NSNumber *pidNumber in applicationPIDs) {
                     pid_t pid = [pidNumber intValue];
                     kill(pid, SIGKILL);
                 }
@@ -777,36 +800,36 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
 
 - (BOOL)isRunning
 {
-    return [self isFirefoxCurrentlyRunning];
+    return [self isApplicationCurrentlyRunning];
 }
 
 - (NSNumber *)processIdentifier
 {
-    if (firefoxTask && [firefoxTask isRunning]) {
-        return @([firefoxTask processIdentifier]);
+    if (applicationTask && [applicationTask isRunning]) {
+        return @([applicationTask processIdentifier]);
     }
     return nil;
 }
 
 - (BOOL)application:(NSApplication *)sender openFile:(NSString *)filename
 {
-    [self openFileInFirefox:filename activate:YES];
+    [self openFileInApplication:filename activate:YES];
     return YES;
 }
 
 - (BOOL)application:(NSApplication *)sender openFileWithoutUI:(NSString *)filename
 {
-    [self openFileInFirefox:filename activate:NO];
+    [self openFileInApplication:filename activate:NO];
     return YES;
 }
 
-- (void)openFileInFirefox:(NSString *)filename activate:(BOOL)shouldActivate
+- (void)openFileInApplication:(NSString *)filename activate:(BOOL)shouldActivate
 {
-    if (![self isFirefoxCurrentlyRunning]) {
-        [self launchFirefoxWithArgs:@[filename]];
+    if (![self isApplicationCurrentlyRunning]) {
+        [self launchApplicationWithArgs:@[filename]];
     } else {
         NSTask *openTask = [[NSTask alloc] init];
-        [openTask setLaunchPath:firefoxExecutablePath];
+        [openTask setLaunchPath:applicationExecutablePath];
         [openTask setArguments:@[@"-remote", [NSString stringWithFormat:@"openURL(%@,new-tab)", filename]]];
         [openTask setStandardOutput:[NSPipe pipe]];
         [openTask setStandardError:[NSPipe pipe]];
@@ -816,7 +839,7 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
             [openTask waitUntilExit];
             
             if (shouldActivate) {
-                [self activateFirefoxWindows];
+                [self activateApplicationWindows];
             }
         NS_HANDLER
         NS_ENDHANDLER
@@ -825,10 +848,10 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     }
 }
 
-- (void)postFirefoxLaunchNotification
+- (void)postApplicationLaunchNotification
 {
     NSDictionary *launchInfo = @{
-        @"NSApplicationName": @"Firefox",
+        @"NSApplicationName": self.applicationName,
         @"NSApplicationPath": [[NSBundle mainBundle] bundlePath]
     };
     
@@ -838,10 +861,10 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
                     userInfo:launchInfo];
 }
 
-- (void)postFirefoxTerminationNotification
+- (void)postApplicationTerminationNotification
 {
     NSDictionary *terminationInfo = @{
-        @"NSApplicationName": @"Firefox",
+        @"NSApplicationName": self.applicationName,
         @"NSApplicationPath": [[NSBundle mainBundle] bundlePath]
     };
     
@@ -854,7 +877,7 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
 - (void)notifyGWorkspaceOfStateChange
 {
     NSDictionary *userInfo = @{
-        @"NSApplicationName": @"Firefox",
+        @"NSApplicationName": self.applicationName,
         @"NSApplicationPath": [[NSBundle mainBundle] bundlePath]
     };
     
@@ -871,21 +894,21 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     }
 }
 
-- (void)handleInitialFirefoxState
+- (void)handleInitialApplicationState
 {
-    if ([self isFirefoxCurrentlyRunning]) {
-        [self activateFirefoxWindows];
+    if ([self isApplicationCurrentlyRunning]) {
+        [self activateApplicationWindows];
     } else {
-        [self launchFirefox];
+        [self launchApplication];
     }
 }
 
-- (BOOL)waitForFirefoxToQuit:(NSTimeInterval)timeout
+- (BOOL)waitForApplicationToQuit:(NSTimeInterval)timeout
 {
     NSDate *startTime = [NSDate date];
     
     while ([[NSDate date] timeIntervalSinceDate:startTime] < timeout) {
-        if (![self isFirefoxCurrentlyRunning]) {
+        if (![self isApplicationCurrentlyRunning]) {
             return YES;
         }
         usleep(100000);
@@ -894,14 +917,14 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     return NO;
 }
 
-- (void)waitForFirefoxToStart
+- (void)waitForApplicationToStart
 {
-    NSArray *firefoxWindowIDs = [self getFirefoxWindowIDs];
+    NSArray *applicationWindowIDs = [self getApplicationWindowIDs];
     
-    if ([firefoxWindowIDs count] > 0) {
-        [self activateFirefoxWindows];
+    if ([applicationWindowIDs count] > 0) {
+        [self activateApplicationWindows];
     } else {
-        [self performSelector:@selector(waitForFirefoxToStart) withObject:nil afterDelay:0.5];
+        [self performSelector:@selector(waitForApplicationToStart) withObject:nil afterDelay:0.5];
     }
 }
 
@@ -910,15 +933,19 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     [self stopEventDrivenMonitoring];
     [self invalidateServiceConnection];
     
-    [firefoxExecutablePath release];
+    [applicationExecutablePath release];
     [cachedWindowList release];
     [lastWindowListUpdate release];
+    [applicationName release];
+    [serviceName release];
+    [windowSearchString release];
+    [bundleIdentifier release];
     
-    if (firefoxTask) {
+    if (applicationTask) {
         [[NSNotificationCenter defaultCenter] removeObserver:self 
                                                         name:NSTaskDidTerminateNotification 
-                                                      object:firefoxTask];
-        [firefoxTask release];
+                                                      object:applicationTask];
+        [applicationTask release];
     }
     
     if (monitorQueue) {
