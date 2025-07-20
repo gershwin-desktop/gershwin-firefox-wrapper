@@ -61,7 +61,4 @@ uninstall::
 		rm -rf "/Applications/Firefox.app"; \
 	fi
 
-debug: all
-	@./Firefox.app/Firefox
-
-.PHONY: install uninstall debug
+.PHONY: install uninstall
