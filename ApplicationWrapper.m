@@ -15,6 +15,7 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
 @synthesize serviceName;
 @synthesize windowSearchString;
 @synthesize bundleIdentifier;
+@synthesize trackedPIDs;
 
 - (id)init
 {
@@ -60,6 +61,9 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
         self.serviceName = [config objectForKey:@"serviceName"];
         self.windowSearchString = [config objectForKey:@"windowSearchString"];
         self.bundleIdentifier = [config objectForKey:@"bundleIdentifier"];
+        
+        self.trackedPIDs = [NSMutableSet set];
+        primaryLaunchedPID = 0;
         
         [self registerForSystemEvents];
     }
@@ -189,6 +193,9 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
         return;
     }
     
+    [self.trackedPIDs removeAllObjects];
+    primaryLaunchedPID = 0;
+    
     [self postApplicationLaunchNotification];
     
     applicationTask = [[NSTask alloc] init];
@@ -208,13 +215,17 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     NS_DURING
         [applicationTask launch];
         applicationPID = [applicationTask processIdentifier];
+        primaryLaunchedPID = applicationPID;
+        [self trackPID:applicationPID];
         
         [self startEventDrivenMonitoring:applicationPID];
         
+        [self performSelector:@selector(discoverChildProcesses) withObject:nil afterDelay:2.0];
         [self performSelector:@selector(waitForApplicationToStart) withObject:nil afterDelay:0.5];
         
     NS_HANDLER
         applicationPID = 0;
+        primaryLaunchedPID = 0;
         
         [[NSNotificationCenter defaultCenter] removeObserver:self 
                                                         name:NSTaskDidTerminateNotification 
@@ -233,13 +244,13 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     NS_ENDHANDLER
 }
 
-- (NSArray *)getAllApplicationProcessIDs
+- (NSArray *)getChildProcesses:(pid_t)parentPID
 {
     int mib[4];
     size_t size;
     struct kinfo_proc *procs;
     int nprocs;
-    NSMutableArray *applicationPIDs = [[NSMutableArray alloc] init];
+    NSMutableArray *children = [[NSMutableArray alloc] init];
     
     mib[0] = CTL_KERN;
     mib[1] = KERN_PROC;
@@ -247,59 +258,62 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     mib[3] = 0;
     
     if (sysctl(mib, 4, NULL, &size, NULL, 0) < 0) {
-        return [applicationPIDs autorelease];
+        return [children autorelease];
     }
     
     procs = malloc(size);
     if (procs == NULL) {
-        return [applicationPIDs autorelease];
+        return [children autorelease];
     }
     
     if (sysctl(mib, 4, procs, &size, NULL, 0) < 0) {
         free(procs);
-        return [applicationPIDs autorelease];
+        return [children autorelease];
     }
     
     nprocs = size / sizeof(struct kinfo_proc);
     
     for (int i = 0; i < nprocs; i++) {
-        NSString *execPath = [self getExecutablePathForPID:procs[i].ki_pid];
-        if (execPath && [execPath isEqualToString:applicationExecutablePath]) {
-            [applicationPIDs addObject:@(procs[i].ki_pid)];
+        if (procs[i].ki_ppid == parentPID) {
+            [children addObject:@(procs[i].ki_pid)];
         }
     }
     
     free(procs);
-    return [applicationPIDs autorelease];
+    return [children autorelease];
+}
+
+- (void)trackPID:(pid_t)pid
+{
+    [self.trackedPIDs addObject:@(pid)];
+}
+
+- (void)untrackPID:(pid_t)pid
+{
+    [self.trackedPIDs removeObject:@(pid)];
+}
+
+- (void)discoverChildProcesses
+{
+    if (primaryLaunchedPID > 0) {
+        NSArray *children = [self getChildProcesses:primaryLaunchedPID];
+        for (NSNumber *childPID in children) {
+            [self trackPID:[childPID intValue]];
+        }
+    }
 }
 
 - (BOOL)isApplicationCurrentlyRunning 
 {
-    NSArray *pids = [self getAllApplicationProcessIDs];
-    return [pids count] > 0;
-}
-
-- (NSString *)getExecutablePathForPID:(pid_t)pid
-{
-    int mib[4];
-    size_t size = ARG_MAX;
-    char *args = malloc(size);
-    
-    if (args == NULL) return nil;
-    
-    mib[0] = CTL_KERN;
-    mib[1] = KERN_PROC;
-    mib[2] = KERN_PROC_ARGS;
-    mib[3] = pid;
-    
-    if (sysctl(mib, 4, args, &size, NULL, 0) == 0) {
-        NSString *result = [NSString stringWithUTF8String:args];
-        free(args);
-        return result;
+    for (NSNumber *pidNumber in [self.trackedPIDs copy]) {
+        pid_t pid = [pidNumber intValue];
+        if (kill(pid, 0) == 0) {
+            return YES;
+        } else {
+            [self untrackPID:pid];
+        }
     }
-    
-    free(args);
-    return nil;
+    return NO;
 }
 
 - (void)startEventDrivenMonitoring:(pid_t)applicationProcessID
@@ -349,14 +363,11 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     
     if (applicationPID > 0) {
         if (kill(applicationPID, 0) == -1 && errno == ESRCH) {
-            [self applicationProcessExited:0];
-            return;
+            [self untrackPID:applicationPID];
         }
     }
     
-    NSArray *applicationPIDs = [self getAllApplicationProcessIDs];
-    
-    if ([applicationPIDs count] == 0) {
+    if (![self isApplicationCurrentlyRunning]) {
         [self applicationProcessExited:0];
         return;
     }
@@ -408,7 +419,10 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
         uint32_t flags = dispatch_source_get_data(procMonitorSource);
         
         if (flags & DISPATCH_PROC_EXIT) {
-            [self applicationProcessExited:0];
+            [self untrackPID:pid];
+            if (![self isApplicationCurrentlyRunning]) {
+                [self applicationProcessExited:0];
+            }
         }
     });
     
@@ -759,9 +773,7 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
 
 - (void)terminate:(id)sender
 {
-    NSArray *applicationPIDs = [self getAllApplicationProcessIDs];
-    
-    if ([applicationPIDs count] > 0) {
+    if ([self isApplicationCurrentlyRunning]) {
         NSTask *quitTask = [[NSTask alloc] init];
         [quitTask setLaunchPath:@"/usr/local/bin/wmctrl"];
         [quitTask setArguments:@[@"-c", self.windowSearchString]];
@@ -779,13 +791,13 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
         if ([self waitForApplicationToQuit:5.0]) {
             [self initiateWrapperTermination];
         } else {
-            for (NSNumber *pidNumber in applicationPIDs) {
+            for (NSNumber *pidNumber in [self.trackedPIDs copy]) {
                 pid_t pid = [pidNumber intValue];
                 kill(pid, SIGTERM);
             }
             
             if (![self waitForApplicationToQuit:2.0]) {
-                for (NSNumber *pidNumber in applicationPIDs) {
+                for (NSNumber *pidNumber in [self.trackedPIDs copy]) {
                     pid_t pid = [pidNumber intValue];
                     kill(pid, SIGKILL);
                 }
@@ -940,6 +952,7 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     [serviceName release];
     [windowSearchString release];
     [bundleIdentifier release];
+    [trackedPIDs release];
     
     if (applicationTask) {
         [[NSNotificationCenter defaultCenter] removeObserver:self 
