@@ -589,9 +589,8 @@ static const NSTimeInterval kWindowListCacheTimeout = 1.0;
     for (NSString *line in lines) {
         if ([line length] > 0) {
             NSRange firefoxRange = [line rangeOfString:@"Firefox" options:NSCaseInsensitiveSearch];
-            NSRange mozillaRange = [line rangeOfString:@"Mozilla" options:NSCaseInsensitiveSearch];
             
-            if (firefoxRange.location != NSNotFound || mozillaRange.location != NSNotFound) {
+            if (firefoxRange.location != NSNotFound) {
                 NSArray *components = [line componentsSeparatedByString:@" "];
                 if ([components count] > 0) {
                     NSString *windowID = [components objectAtIndex:0];
