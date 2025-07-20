@@ -6,5 +6,3 @@ WINDOW_SEARCH_STRING = Firefox
 BUNDLE_ID = org.gnustep.firefox-wrapper
 ICON_FILE = Firefox.png
 VERSION = 3.0.0
-
-include GNUmakefile
